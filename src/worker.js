@@ -296,7 +296,8 @@ async function eaBars(req, env, ctx) {
   let go = newH1 && !!st.lastH1;
   if (!go && st.lastH1) {   // retry a bar whose decision failed (API error), max 3 tries
     const rt = await getDoc(env, 'state', 'retry');
-    go = !!rt && rt.bar === h1[h1.length - 1].t && (rt.tries || 0) < 3;
+    go = !!rt && rt.bar === h1[h1.length - 1].t && (rt.tries || 0) < 3
+      && !(await env.DB.prepare('SELECT 1 FROM decisions WHERE bar_t=? LIMIT 1').bind(rt.bar).first());   // not if the retry already succeeded
   }
   if (go) ctx.waitUntil(decide(env, h1, m15, spread));
   return json({ ok: true, decided: go });
