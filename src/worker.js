@@ -34,7 +34,18 @@ const kvGet = async (env, k, d = null) => { const r = await env.DB.prepare('SELE
 const kvSet = (env, k, v) => env.DB.prepare('INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v').bind(k, String(v)).run();
 const getDoc = async (env, c, id) => { const r = await env.DB.prepare('SELECT data FROM docs WHERE coll=? AND id=?').bind(c, id).first(); return r ? JSON.parse(r.data) : null; };
 const setDoc = (env, c, id, d) => env.DB.prepare('INSERT INTO docs VALUES(?,?,?) ON CONFLICT(coll,id) DO UPDATE SET data=excluded.data').bind(c, id, JSON.stringify(d)).run();
-const event = (env, level, msg) => env.DB.prepare('INSERT INTO events(time,level,msg) VALUES(?,?,?)').bind(nowIso(), level, String(msg).slice(0, 1000)).run();
+// events feed the web log and the Agent Office (agent = who walks to the boss, kind = what happened)
+const event = (env, level, msg, agent = 'sys', kind = null) => env.DB.prepare('INSERT INTO events(time,level,msg,agent,kind) VALUES(?,?,?,?,?)')
+  .bind(nowIso(), level, String(msg).slice(0, 1000), agent, kind || (level === 'ERROR' ? 'err' : level === 'WARN' ? 'warn' : 'info')).run();
+const px = x => (+x).toFixed(2);
+const SIDE = s => s > 0 ? 'BUY' : 'SELL';
+const WHY = { tp: 'TP', sl: 'SL', trail: 'SL ที่เลื่อนแล้ว', ai_close: 'AI สั่งปิด', expired: 'หมดเวลา', ai_cancel: 'AI ยกเลิก' };
+async function tradeEvent(env, tr, what) {
+  const who = tr.kind === 'rand' ? 'rand' : 'ai';
+  if (what === 'fill') return event(env, 'INFO', `เปิด ${SIDE(tr.side)} @ ${px(tr.fill)} · SL ${px(tr.sl)} · TP ${px(tr.tp)}` + (tr.kind === 'rand' ? ` (สุ่มฝั่ง คู่กับไม้ AI #${tr.twin_of})` : ''), who, 'open');
+  if (what === 'close') return event(env, 'INFO', `ปิด ${SIDE(tr.side)} ที่ ${WHY[tr.exit_reason] || tr.exit_reason} ${px(tr.exit)} · ${tr.r >= 0 ? '+' : ''}${tr.r}R`, who, 'close');
+  if (what === 'cancel') return event(env, 'INFO', `ยกเลิกออเดอร์ ${SIDE(tr.side)} ${tr.otype.toUpperCase()} @ ${px(tr.entry)} (${WHY[tr.exit_reason] || tr.exit_reason})`, who, 'cancel');
+}
 
 // ---------------- auth ----------------
 async function session(req, env) {
@@ -114,11 +125,15 @@ async function runEngine(env, m15, spread, sinceT) {
       const wasPending = tr.status === 'pending';
       if (stepTrade(tr, b, spread)) {
         await saveTrade(env, tr);
+        if (wasPending && tr.fill_t) await tradeEvent(env, tr, 'fill');
+        if (tr.status === 'cancelled') await tradeEvent(env, tr, 'cancel');
+        if (tr.status === 'closed') await tradeEvent(env, tr, 'close');
         if (tr.kind === 'ai' && wasPending && tr.fill_t) {   // benchmark twin: random side, same distances, opened at the AI fill
           const side = crypto.getRandomValues(new Uint8Array(1))[0] & 1 ? 1 : -1, dSL = Math.abs(tr.entry - tr.sl_init), dTP = Math.abs(tr.tp - tr.entry);
           const bid = tr.side > 0 ? tr.fill - spread : tr.fill, fill = side > 0 ? bid + spread : bid;
           const tw = await insertTrade(env, { kind: 'rand', status: 'open', side, otype: 'market', created_t: tr.fill_t, expiry_t: tr.fill_t, entry: fill,
             sl: fill - side * dSL, sl_init: fill - side * dSL, tp: fill + side * dTP, fill_t: tr.fill_t, fill, decision_id: tr.decision_id, twin_of: tr.id });
+          await tradeEvent(env, tw, 'fill');
           live.push(tw);
         }
         if (tr.status === 'closed') closed.push(tr);
@@ -218,7 +233,7 @@ function validate(p, price, spread, atrH1, live) {
 }
 
 async function decide(env, h1, m15, spread) {
-  if (!env.ANTHROPIC_API_KEY) { await event(env, 'WARN', 'ยังไม่ได้ใส่ ANTHROPIC_API_KEY'); return; }
+  if (!env.ANTHROPIC_API_KEY) { await event(env, 'WARN', 'ยังไม่ได้ใส่ ANTHROPIC_API_KEY', 'ai', 'err'); return; }
   if ((await kvGet(env, 'paused', '0')) === '1') return;
   const live = (await env.DB.prepare("SELECT * FROM trades WHERE kind='ai' AND status IN ('pending','open')").all()).results;
   const recent = (await env.DB.prepare("SELECT * FROM trades WHERE kind='ai' AND status='closed' ORDER BY exit_t DESC LIMIT 8").all()).results;
@@ -233,7 +248,7 @@ async function decide(env, h1, m15, spread) {
     // remember the failure; eaBars retries this H1 bar on the next M15 posts (at most 3 tries per bar)
     const rt = (await getDoc(env, 'state', 'retry')) || {};
     await setDoc(env, 'state', 'retry', { bar: barH1, tries: rt.bar === barH1 ? (rt.tries || 0) + 1 : 1 });
-    await event(env, 'ERROR', e.message); return;
+    await event(env, 'ERROR', e.message, 'ai', 'err'); return;
   }
   const v = validate(plan, price, spread, atrH1, live);
   const d = await env.DB.prepare('INSERT INTO decisions(time,bar_t,model,tokens_in,tokens_out,plan,valid,note) VALUES(?,?,?,?,?,?,?,?)')
@@ -243,23 +258,28 @@ async function decide(env, h1, m15, spread) {
     await env.DB.prepare('UPDATE trades SET lesson=? WHERE id=?').bind(String(plan.lesson).slice(0, 300), needLesson.id).run();
     L.items.push({ t: nowIso(), r: needLesson.r, text: String(plan.lesson).slice(0, 300) }); L.items = L.items.slice(-40); await setDoc(env, 'state', 'lessons', L);
   }
-  if (!v.ok || plan.action === 'wait') return;
+  if (!v.ok) { await event(env, 'INFO', `แผน ${plan.action} ถูกปัดตก: ${v.why}`, 'ai', 'reject'); return; }
+  if (plan.action === 'wait') { await event(env, 'INFO', `รอ · ${plan.market_view || ''}`.slice(0, 160), 'ai', 'plan'); return; }
   const barT = m15[m15.length - 1].t + 15 * 60e3;   // orders act from the next M15 bar
-  if (plan.action === 'close') { const t = live.find(x => x.status === 'open'); close(t, t.side > 0 ? price : price + spread, barT, 'ai_close'); await saveTrade(env, t); return; }
-  if (plan.action === 'cancel_pending') { const t = live.find(x => x.status === 'pending'); t.status = 'cancelled'; t.exit_reason = 'ai_cancel'; t.exit_t = barT; await saveTrade(env, t); return; }
-  if (plan.action === 'move_sl') { const t = live.find(x => x.status === 'open'); t.sl = +plan.sl; await saveTrade(env, t); return; }
+  if (plan.action === 'close') { const t = live.find(x => x.status === 'open'); close(t, t.side > 0 ? price : price + spread, barT, 'ai_close'); await saveTrade(env, t); await tradeEvent(env, t, 'close'); return; }
+  if (plan.action === 'cancel_pending') { const t = live.find(x => x.status === 'pending'); t.status = 'cancelled'; t.exit_reason = 'ai_cancel'; t.exit_t = barT; await saveTrade(env, t); await tradeEvent(env, t, 'cancel'); return; }
+  if (plan.action === 'move_sl') { const t = live.find(x => x.status === 'open'); const old = t.sl; t.sl = +plan.sl; await saveTrade(env, t);
+    await event(env, 'INFO', `ขยับ SL ${SIDE(t.side)} จาก ${px(old)} เป็น ${px(t.sl)}`, 'ai', 'sl'); return; }
   const expH = Math.min(Math.max(+plan.expiry_hours || 4, 1), RULES.maxExpiryH);
   const streak = (await env.DB.prepare("SELECT r FROM trades WHERE kind='ai' AND status='closed' ORDER BY exit_t DESC LIMIT ?").bind(RULES.maxLossStreakPause).all()).results;
-  if (streak.length >= RULES.maxLossStreakPause && streak.every(x => x.r <= 0)) { await kvSet(env, 'paused', '1'); await event(env, 'WARN', `แพ้ติดกัน ${RULES.maxLossStreakPause} ไม้ -> หยุดเปิดไม้ใหม่ รอคนตรวจ`); return; }
+  if (streak.length >= RULES.maxLossStreakPause && streak.every(x => x.r <= 0)) { await kvSet(env, 'paused', '1'); await event(env, 'WARN', `แพ้ติดกัน ${RULES.maxLossStreakPause} ไม้ -> หยุดเปิดไม้ใหม่ รอคนตรวจ`, 'boss', 'stop'); return; }
   const tr = { kind: 'ai', status: v.type === 'market' ? 'open' : 'pending', side: v.side, otype: v.type, created_t: barT, expiry_t: barT + expH * 3600e3,
     entry: v.entry, sl: +plan.sl, sl_init: +plan.sl, tp: +plan.tp, decision_id: did };
   if (v.type === 'market') { tr.fill = v.entry; tr.fill_t = barT; }
   await insertTrade(env, tr);
+  if (v.type === 'market') await tradeEvent(env, tr, 'fill');
+  else await event(env, 'INFO', `ตั้ง ${SIDE(tr.side)} ${tr.otype.toUpperCase()} @ ${px(tr.entry)} · SL ${px(tr.sl)} · TP ${px(tr.tp)} · หมดอายุ ${expH} ชม.`, 'ai', 'order');
   if (v.type === 'market') {   // twin for market entries is created here (pending ones get theirs when filled)
     const side = crypto.getRandomValues(new Uint8Array(1))[0] & 1 ? 1 : -1, dSL = Math.abs(tr.entry - tr.sl), dTP = Math.abs(tr.tp - tr.entry);
     const fill = side > 0 ? price + spread : price;
-    await insertTrade(env, { kind: 'rand', status: 'open', side, otype: 'market', created_t: barT, expiry_t: barT, entry: fill, sl: fill - side * dSL, sl_init: fill - side * dSL,
+    const tw = await insertTrade(env, { kind: 'rand', status: 'open', side, otype: 'market', created_t: barT, expiry_t: barT, entry: fill, sl: fill - side * dSL, sl_init: fill - side * dSL,
       tp: fill + side * dTP, fill_t: barT, fill, decision_id: did, twin_of: tr.id });
+    await tradeEvent(env, tw, 'fill');
   }
 }
 
@@ -280,6 +300,139 @@ async function eaBars(req, env, ctx) {
   }
   if (go) ctx.waitUntil(decide(env, h1, m15, spread));
   return json({ ok: true, decided: go });
+}
+
+
+// ---------------- heartbeat + research department + Agent Office ----------------
+// EA v1.02 pings every 60 s: VPS dot = last ping received, MT5 dot = last ping where the terminal was connected to the broker.
+async function eaPing(req, env) {
+  const e = await req.json().catch(() => ({})), now = Date.now();
+  const prev = (await getDoc(env, 'state', 'ping')) || {};
+  const connected = !!e.connected;
+  const err = String(e.err || '').slice(0, 200);
+  const d = { at: now, connected, conn_at: connected ? now : (prev.conn_at || 0), bid: +e.bid || null, ask: +e.ask || null, ping_ms: +e.ping_ms || null,
+    ver: String(e.ver || ''), err, err_at: err ? (err === prev.err ? prev.err_at : now) : 0 };
+  await setDoc(env, 'state', 'ping', d);
+  if (err && err !== prev.err) await event(env, 'ERROR', 'ส่งแท่งไม่สำเร็จ: ' + err, 'feed', 'err');
+  if (!err && prev.err) await event(env, 'INFO', 'ส่งแท่งได้ตามปกติอีกครั้ง', 'feed', 'info');
+  if (prev.at && now - prev.at > 10 * 60e3) await event(env, 'INFO', `EA กลับมาออนไลน์ (เงียบไป ${Math.round((now - prev.at) / 60e3)} นาที)`, 'feed', 'info');
+  return json({ ok: true });
+}
+const DEPT = ['scout', 'tester', 'auditor', 'librarian', 'report'];
+const DEPT_KINDS = ['start', 'rep', 'idea', 'pass', 'fail', 'err', 'info'];
+async function deptReport(req, env) {
+  const h = req.headers.get('authorization') || ''; const tok = h.startsWith('Bearer ') ? h.slice(7).trim() : '';
+  const sec = await getDoc(env, 'secrets', 'dept'); if (!(tok && sec && safeEqual(await sha256(tok), sec.hash))) return json({ error: 'unauthorized' }, 401);
+  const e = await req.json().catch(() => ({})), now = Date.now();
+  const st = (await getDoc(env, 'state', 'dept')) || { roles: {} };
+  for (const [k, v] of Object.entries(e.roles || {})) {
+    if (!DEPT.includes(k) || !v) continue;
+    st.roles[k] = { state: ['working', 'idle', 'error'].includes(v.state) ? v.state : 'idle', msg: String(v.msg || '').slice(0, 200),
+      stats: (Array.isArray(v.stats) ? v.stats : []).slice(0, 3).map(x => [String(x[0]).slice(0, 20), String(x[1]).slice(0, 20)]), at: now };
+  }
+  if (e.summary) st.summary = { tested: +e.summary.tested || 0, passed: +e.summary.passed || 0, backlog: +e.summary.backlog || 0, night: String(e.summary.night || '').slice(0, 20) };
+  if (e.run === 'start') st.run_start = now;
+  if (e.run === 'end') st.run_end = now;
+  st.at = now; await setDoc(env, 'state', 'dept', st);
+  for (const x of (e.events || []).slice(0, 20)) {
+    if (!DEPT.includes(x.agent)) continue;
+    const kind = DEPT_KINDS.includes(x.kind) ? x.kind : 'info';
+    await event(env, kind === 'err' ? 'ERROR' : 'INFO', String(x.msg || '').slice(0, 300), x.agent, kind);
+  }
+  return json({ ok: true });
+}
+// Exness gold (server = UTC): closed Fri 21:00 -> Sun 22:00, daily break ~21:00-22:05
+function marketOpen(ms) {
+  const d = new Date(ms), wd = d.getUTCDay(), m = d.getUTCHours() * 60 + d.getUTCMinutes();
+  if (wd === 6 || (wd === 0 && m < 22 * 60 + 5) || (wd === 5 && m >= 21 * 60)) return false;
+  return !(m >= 21 * 60 && m < 22 * 60 + 5);
+}
+const tsOf = s => s ? Date.parse(s.replace(' ', 'T') + 'Z') : 0;
+async function office(env) {
+  const now = Date.now();
+  const trades = (await env.DB.prepare('SELECT * FROM trades ORDER BY id').all()).results;
+  const ev = (await env.DB.prepare('SELECT id,time,level,msg,agent,kind FROM events ORDER BY id DESC LIMIT 40').all()).results;
+  const feed = await getDoc(env, 'state', 'feed'), ping = await getDoc(env, 'state', 'ping'), dept = (await getDoc(env, 'state', 'dept')) || { roles: {} };
+  const paused = (await kvGet(env, 'paused', '0')) === '1';
+  const lastDec = await env.DB.prepare('SELECT id,time,plan,valid FROM decisions ORDER BY id DESC LIMIT 1').first();
+  const nM15 = (await env.DB.prepare("SELECT COUNT(*) n FROM bars WHERE tf='M15'").first()).n;
+  const pingFresh = ping && now - ping.at < 5 * 60e3;
+  const bid = pingFresh && ping.bid ? ping.bid : (await env.DB.prepare("SELECT c FROM bars WHERE tf='M15' ORDER BY t DESC LIMIT 1").first() || {}).c;
+  const spread = pingFresh && ping.ask && ping.bid ? ping.ask - ping.bid : (feed ? feed.spread : 0.2);
+  const priceAt = pingFresh ? ping.at : (feed ? tsOf(feed.at) : 0);
+  const bkkDay = ms => Math.floor((ms + 7 * 3600e3) / 86400e3);
+  const today = bkkDay(now);
+  const lastEv = a => { const x = ev.find(e => e.agent === a); return x ? tsOf(x.time) : null; };
+  const floatR = t => { if (t.status !== 'open' || !bid) return null; const risk = Math.abs(t.fill - t.sl_init) || 1;
+    return t.side > 0 ? (bid - t.fill) / risk : (t.fill - (bid + spread)) / risk; };
+  function book(kind) {
+    const cl = trades.filter(t => t.kind === kind && t.status === 'closed' && t.r !== null).sort((a, b) => a.exit_t - b.exit_t);
+    let eq = 10000, peak = 10000, cum = 0, cumPeak = 0, ddR = 0, eqDay = null, streak = 0;
+    for (const t of cl) {
+      if (eqDay === null && bkkDay(t.exit_t) >= today) eqDay = eq;
+      eq *= 1 + 0.01 * t.r; peak = Math.max(peak, eq); cum += t.r; cumPeak = Math.max(cumPeak, cum); ddR = Math.min(ddR, cum - cumPeak);
+    }
+    for (let i = cl.length - 1; i >= 0 && cl[i].r <= 0; i--) streak++;
+    const open = trades.find(t => t.kind === kind && t.status === 'open'), pend = trades.find(t => t.kind === kind && t.status === 'pending');
+    const fR = open ? floatR(open) : null;
+    const eqNow = eq * (1 + 0.01 * (fR || 0));
+    if (eqDay === null) eqDay = eq;
+    return { n: cl.length, sum_r: r2(cum), dd_r: r2(Math.min(ddR, cum + (fR || 0) - cumPeak)), streak, eq_closed: r2(eq), eq: r2(eqNow), peak: r2(Math.max(peak, eqNow)),
+      dd_pct: r2((Math.max(peak, eqNow) - eqNow) / Math.max(peak, eqNow) * 100), today_usd: r2(eqNow - eqDay), today_pct: r2((eqNow - eqDay) / eqDay * 100),
+      today_r: r2(cl.filter(t => bkkDay(t.exit_t) === today).reduce((a, t) => a + t.r, 0)),
+      win: cl.length ? Math.round(cl.filter(t => t.r > 0).length / cl.length * 100) : null,
+      open: open ? { side: SIDE(open.side), entry: open.fill, sl: open.sl, sl_init: open.sl_init, tp: open.tp, float_r: fR === null ? null : r2(fR),
+        float_usd: fR === null ? null : r2(fR * 0.01 * eq), float_oz: bid ? r2(open.side > 0 ? bid - open.fill : open.fill - (bid + spread)) : null, since: open.fill_t } : null,
+      pending: pend ? { side: SIDE(pend.side), type: pend.otype, entry: pend.entry, sl: pend.sl, tp: pend.tp, expires: pend.expiry_t } : null };
+  }
+  const ai = book('ai'), rnd = book('rand');
+  const mOpen = marketOpen(now);
+  // AI status
+  const lastAiErr = ev.find(e => e.agent === 'ai' && e.kind === 'err');
+  const aiErr = lastAiErr && (!lastDec || tsOf(lastAiErr.time) > tsOf(lastDec.time)) && now - tsOf(lastAiErr.time) < 3 * 3600e3;
+  const feedAge = feed ? now - tsOf(feed.at) : Infinity;
+  const feedErr = mOpen && (feedAge > 20 * 60e3 || (ping && ping.err && now - ping.at < 10 * 60e3) || (ping && now - ping.at > 5 * 60e3));
+  const lp = lastDec ? JSON.parse(lastDec.plan || '{}') : null;
+  const agents = [];
+  agents.push({ id: 'ai', name: 'AI-GOLD', room: 'm', grp: 'MARK2', mk: `XAUUSD · วางแผนทุกแท่ง H1 · ${MODEL}`,
+    st: aiErr ? 'error' : paused ? 'stop' : ai.open ? 'hold' : 'wait',
+    label: aiErr ? 'error' : paused ? 'หยุด' : ai.open ? 'ถือไม้' : ai.pending ? 'ตั้งออเดอร์รอ' : 'รอสัญญาณ',
+    pos: ai.open, pending: ai.pending,
+    note: aiErr ? 'เรียก Claude ไม่สำเร็จ: ' + lastAiErr.msg.slice(0, 120) : paused ? 'หยุดเปิดไม้ใหม่ (กฎแพ้ติดกัน/กดหยุด) รอคนตรวจ'
+      : lp ? `แผนล่าสุด: ${lp.action} · ${lp.market_view || ''}`.slice(0, 160) : 'ยังไม่มีแผน รอแท่ง H1 ถัดไป',
+    stats: [['รวม R', (ai.sum_r >= 0 ? '+' : '') + ai.sum_r + 'R', ai.sum_r > 0 ? 'up' : ai.sum_r < 0 ? 'down' : ''], ['DD ระบบ', ai.dd_r + 'R', ''], ['ไม้ปิด', ai.n + (ai.win !== null ? ` · ชนะ ${ai.win}%` : ''), '']],
+    last: lastEv('ai') });
+  agents.push({ id: 'rand', name: 'RANDOM TWIN', room: 'm', grp: 'BENCHMARK', mk: 'สุ่มฝั่ง · SL/TP เท่ากับไม้ AI',
+    st: rnd.open ? 'hold' : paused ? 'stop' : 'wait', label: rnd.open ? 'ถือไม้' : paused ? 'หยุด' : 'รอไม้ AI',
+    pos: rnd.open, note: 'เปิดไม้พร้อมกับตอนที่ไม้ AI ได้ fill เท่านั้น',
+    stats: [['รวม R', (rnd.sum_r >= 0 ? '+' : '') + rnd.sum_r + 'R', rnd.sum_r > 0 ? 'up' : rnd.sum_r < 0 ? 'down' : ''], ['DD ระบบ', rnd.dd_r + 'R', ''], ['AI − Twin', ai.n ? r2(ai.sum_r / Math.max(ai.n, 1) - rnd.sum_r / Math.max(rnd.n, 1)) + 'R/ไม้' : '—', '']],
+    last: lastEv('rand') });
+  agents.push({ id: 'feed', name: 'FEED', room: 'm', grp: 'EA · EXNESS', mk: 'AIBarsEA ส่งแท่ง M15/H1 ' + (feed ? feed.symbol : ''),
+    st: feedErr ? 'error' : !mOpen ? 'stop' : 'hold', label: feedErr ? 'error' : !mOpen ? 'ตลาดปิด' : 'ส่งข้อมูล',
+    note: feedErr ? (ping && ping.err ? 'ส่งแท่งไม่สำเร็จ: ' + ping.err : feedAge > 20 * 60e3 ? `ไม่ได้รับแท่งมา ${Math.round(feedAge / 60e3)} นาที` : 'EA ไม่ ping มาเกิน 5 นาที')
+      : `แท่ง M15 ล่าสุด ${feed ? iso(feed.lastM15 + 7 * 3600e3).slice(11) : '—'} น. · spread ${feed ? feed.spread : '—'}` + (ping && ping.ping_ms ? ` · ping ${ping.ping_ms} ms` : ''),
+    stats: [['แท่ง M15', String(nM15), ''], ['โบรก', ping ? (ping.connected ? 'เชื่อมต่อ' : 'หลุด') : '—', ping && !ping.connected ? 'down' : ''], ['ราคา', bid ? px(bid) : '—', '']],
+    last: feed ? tsOf(feed.at) : null });
+  const RN = { scout: ['SCOUT', 'หาไอเดียใหม่'], tester: ['TESTER', 'backtest ตามมาตรฐาน'], auditor: ['AUDITOR', 'ตรวจผลแบบไม่เห็นงาน'], librarian: ['LIBRARIAN', 'บันทึก journal / backlog'], report: ['REPORT', 'สรุปผลให้เจ้าของ'] };
+  const missed = dept.run_end ? now - dept.run_end > 30 * 3600e3 : false;
+  for (const k of DEPT) {
+    const r = dept.roles[k] || {};
+    const st = r.state === 'error' || (k === 'report' && missed) ? 'error' : r.state === 'working' && now - (r.at || 0) < 4 * 3600e3 ? 'hold' : 'wait';
+    agents.push({ id: k, name: RN[k][0], room: 's', grp: 'RESEARCH', mk: RN[k][1] + ' · ทุกคืน 01:37',
+      st, label: st === 'error' ? 'error' : st === 'hold' ? 'กำลังทำงาน' : 'รอรอบคืนนี้',
+      note: k === 'report' && missed ? 'รอบคืนล่าสุดไม่ได้รายงานเกิน 30 ชม.' : r.msg || 'ยังไม่มีรายงานจากรอบกลางคืน',
+      stats: (r.stats && r.stats.length ? r.stats : k === 'tester' && dept.summary ? [['ทดสอบแล้ว', String(dept.summary.tested)], ['ผ่าน', String(dept.summary.passed)], ['คิว', String(dept.summary.backlog)]]
+        : [['ทดสอบแล้ว', dept.summary ? String(dept.summary.tested) : '—'], ['ผ่าน', dept.summary ? String(dept.summary.passed) : '—'], ['คิว', dept.summary ? String(dept.summary.backlog) : '—']]).map(x => [x[0], x[1], '']),
+      last: lastEv(k) || r.at || null });
+  }
+  const evToday = ev.filter(e => bkkDay(tsOf(e.time)) === today).length;
+  return {
+    now, market_open: mOpen,
+    kpi: { equity: ai.eq, today_usd: ai.today_usd, today_pct: ai.today_pct, today_r: ai.today_r, dd_pct: ai.dd_pct, dd_limit: 15, peak: ai.peak,
+      streak: ai.streak, streak_limit: RULES.maxLossStreakPause, paused,
+      open: { ai: (ai.open ? 1 : 0), ai_pending: ai.pending ? 1 : 0, rand: rnd.open ? 1 : 0 } },
+    hb: { mt5: ping ? ping.conn_at : null, vps: ping ? ping.at : null, feed: feed ? tsOf(feed.at) : null, ver: ping ? ping.ver : null, price_at: priceAt },
+    agents, events: ev.map(e => ({ id: e.id, t: tsOf(e.time), agent: e.agent || 'sys', kind: e.kind || (e.level === 'ERROR' ? 'err' : 'info'), msg: e.msg })), events_today: evToday };
 }
 
 // ---------------- web API ----------------
@@ -303,12 +456,16 @@ export default {
     const u = new URL(req.url), p = u.pathname;
     try {
       if (p === '/ea/bars' && req.method === 'POST') { if (!(await eaAuth(req, env))) return json({ error: 'unauthorized' }, 401); return eaBars(req, env, ctx); }
+      if (p === '/ea/ping' && req.method === 'POST') { if (!(await eaAuth(req, env))) return json({ error: 'unauthorized' }, 401); return eaPing(req, env); }
+      if (p === '/dept/report' && req.method === 'POST') return deptReport(req, env);
+      if (p === '/office') return env.ASSETS.fetch(new Request(new URL('/office.html', req.url), req));
       if (p === '/api/login' && req.method === 'POST') return login(req, env);
       if (p === '/api/status') return json({ setup: !(await getDoc(env, 'secrets', 'auth')), authed: await session(req, env) });
       if (p.startsWith('/api/')) {
         if (!(await session(req, env))) return json({ error: 'login required' }, 401);
         if (p === '/api/view') return json(await view(env));
-        if (p === '/api/pause' && req.method === 'POST') { const { paused } = await req.json(); await kvSet(env, 'paused', paused ? '1' : '0'); await event(env, 'WARN', paused ? 'หยุด AI (กดจากหน้าเว็บ)' : 'เปิด AI ต่อ (กดจากหน้าเว็บ)'); return json({ ok: true }); }
+        if (p === '/api/office') return json(await office(env));
+        if (p === '/api/pause' && req.method === 'POST') { const { paused } = await req.json(); await kvSet(env, 'paused', paused ? '1' : '0'); await event(env, 'WARN', paused ? 'หยุด AI (กดจากหน้าเว็บ)' : 'เปิด AI ต่อ (กดจากหน้าเว็บ)', 'boss', paused ? 'stop' : 'info'); return json({ ok: true }); }
         return json({ error: 'not found' }, 404);
       }
       return env.ASSETS.fetch(req);

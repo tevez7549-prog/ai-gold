@@ -8,7 +8,7 @@
 //| token. Allow the Worker URL in Tools > Options > Expert Advisors.|
 //+------------------------------------------------------------------+
 #property copyright "AI-GOLD"
-#property version   "1.01"
+#property version   "1.02"
 #property strict
 
 input string WorkerURL = "https://ai-gold.tevez7549.workers.dev";
@@ -18,11 +18,28 @@ input int    H1Bars    = 400;
 
 datetime lastM15 = 0;
 datetime lastTry = 0;
+uint     lastPing = 0;
+string   lastErr = "";   // last failed bar post, reported in the heartbeat ("" = last post OK)
 
-int OnInit() { EventSetTimer(15); Print("AIBarsEA v1.01 started on ", _Symbol, " (bars only, no trading)"); return INIT_SUCCEEDED; }
+int OnInit() { EventSetTimer(15); Print("AIBarsEA v1.02 started on ", _Symbol, " (bars only, no trading)"); return INIT_SUCCEEDED; }
 void OnDeinit(const int r) { EventKillTimer(); }
 void OnTick() { Step(); }
-void OnTimer() { Step(); }
+void OnTimer() { Step(); Ping(); }
+
+// v1.02 heartbeat every 60 s for the Agent Office: VPS alive + terminal connected to the broker + live bid/ask + last post error
+void Ping() {
+   if(lastPing != 0 && GetTickCount() - lastPing < 60000) return;
+   lastPing = GetTickCount();
+   string e = lastErr; StringReplace(e, "\\", "/"); StringReplace(e, "\"", "'"); StringReplace(e, "\r", " "); StringReplace(e, "\n", " ");
+   string body = StringFormat("{\"ver\":\"1.02\",\"bid\":%.3f,\"ask\":%.3f,\"connected\":%s,\"ping_ms\":%d,\"err\":\"%s\"}",
+      SymbolInfoDouble(_Symbol, SYMBOL_BID), SymbolInfoDouble(_Symbol, SYMBOL_ASK),
+      TerminalInfoInteger(TERMINAL_CONNECTED) ? "true" : "false", (int)(TerminalInfoInteger(TERMINAL_PING_LAST) / 1000), e);
+   char data[], res[]; string hdr;
+   StringToCharArray(body, data, 0, StringLen(body), CP_UTF8);
+   string h = "Content-Type: application/json\r\nAuthorization: Bearer " + Token + "\r\n";
+   int code = WebRequest("POST", WorkerURL + "/ea/ping", h, 5000, data, res, hdr);
+   if(code != 200) PrintFormat("AIBarsEA ping failed code=%d err=%d", code, GetLastError());
+}
 
 string BarsJson(ENUM_TIMEFRAMES tf, int n) {
    MqlRates r[]; ArraySetAsSeries(r, false);
@@ -49,7 +66,8 @@ void Step() {
    ResetLastError();
    int code = WebRequest("POST", WorkerURL + "/ea/bars", h, 15000, data, res, hdr);
    int err = GetLastError();
-   if(code == 200) { lastM15 = t; return; }
+   if(code == 200) { lastM15 = t; lastErr = ""; return; }
    string msg = ArraySize(res) > 0 ? CharArrayToString(res, 0, MathMin(ArraySize(res), 200), CP_UTF8) : "";
    PrintFormat("AIBarsEA post failed code=%d err=%d %s%s", code, err, msg, err == 4014 ? " -> add the URL in Tools > Options > Expert Advisors (Allow WebRequest)" : "");
+   lastErr = StringFormat("code=%d err=%d %s", code, err, StringSubstr(msg, 0, 80));
 }

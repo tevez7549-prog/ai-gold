@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mark2 · Agent Office</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@400;600;700&family=Pixelify+Sans:wght@500;700&display=swap">
+<style>
+/* Agent Office for Mark2 (AI-GOLD). Read-only: every number comes from /api/office (ai-gold D1). Layout, sprites and colours are from the approved mockup. */
+:root {
+  color-scheme: dark;
+  --bg: #17131F; --bezel: #2A2236; --bezel-edge: #3B3049; --fg: #F1E9DA; --muted: #B9AEC6;
+  --parch: #F7EBD0; --parch-ink: #3A2518; --parch-muted: #7A5A40; --parch-edge: #5A3A26;
+  --teal: #2EC4B6; --hold: #3E8EF0; --wait: #8C8C9C; --stop: #E2A422; --err: #E5484D; --up: #4ADE80; --down: #FB923C; --panel: #221B2D;
+  --font-pixel: "Pixelify Sans", "Courier New", monospace; --font-body: "IBM Plex Sans Thai", system-ui, sans-serif;
+}
+* { box-sizing: border-box }
+body {
+  margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 24px 40px;
+}
+a { color: var(--teal) }
+.wrap { max-width: 1200px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px }
+header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px }
+h1 { margin: 0; font-family: var(--font-pixel); font-weight: 700; font-size: clamp(28px, 5vw, 44px); letter-spacing: 0.02em; text-wrap: balance }
+h1 span { color: var(--teal) }
+.sub { margin: 4px 0 0; color: var(--muted); font-size: 14px }
+.controls { display: flex; gap: 8px; flex-wrap: wrap }
+.btn { font-family: var(--font-pixel); font-size: 15px; color: var(--fg); background: var(--bezel); border: 2px solid var(--bezel-edge); border-radius: 4px; padding: 8px 14px; min-height: 44px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center }
+.btn[aria-pressed="true"] { background: var(--teal); color: #10231F; border-color: var(--teal) }
+.btn:focus-visible { outline: 3px solid var(--teal); outline-offset: 2px }
+.banner { display: none; background: #3A1D22; border: 2px solid #8A2E33; border-radius: 6px; padding: 12px 14px; font-size: 14px }
+.banner.show { display: block }
+
+.screen { background: var(--bezel); border: 3px solid var(--bezel-edge); border-radius: 10px; padding: 10px; box-shadow: 0 10px 0 #0E0B14 }
+.stage { position: relative; width: 100%; max-width: 100%; aspect-ratio: 384 / 216; overflow: hidden; border-radius: 4px; background: #0E0B14 }
+#cv { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; image-rendering: crisp-edges }
+.ov { position: absolute; inset: 0; pointer-events: none; --u: 3px }
+.tag { position: absolute; display: flex; align-items: center; gap: calc(var(--u) * 1.2); font-family: var(--font-pixel); font-size: max(8px, calc(var(--u) * 4.6)); line-height: 1; white-space: nowrap; transform: translateY(-50%) }
+.tag b { font-weight: 700; color: #fff; background: #2B2236; border: max(1px, calc(var(--u) * 0.6)) solid #0E0B14; padding: calc(var(--u) * 0.9) calc(var(--u) * 1.6); border-radius: calc(var(--u) * 0.8) }
+.chip { font-family: var(--font-body); font-weight: 600; font-size: max(8px, calc(var(--u) * 3.8)); color: #fff; padding: calc(var(--u) * 0.6) calc(var(--u) * 1.4); border-radius: calc(var(--u) * 3); border: max(1px, calc(var(--u) * 0.5)) solid #0E0B14 }
+.chip.hold { background: var(--hold) } .chip.wait { background: #5E5E70 } .chip.stop { background: #B07A0C } .chip.error { background: var(--err) } .chip.boss { background: #2E8A55 } .chip.warn { background: #C2620E }
+.bubble { position: absolute; font-family: var(--font-body); font-weight: 600; font-size: max(9px, calc(var(--u) * 4.2)); line-height: 1.25; color: var(--parch-ink); background: #FFFDF6; border: max(1px, calc(var(--u) * 0.7)) solid #2A1A1A; border-radius: calc(var(--u) * 1.5); padding: calc(var(--u) * 1) calc(var(--u) * 2); white-space: nowrap; transform: translate(-10%, -100%); max-width: 70%; overflow: hidden; text-overflow: ellipsis }
+.bubble.q { font-family: var(--font-pixel); font-weight: 700; padding: calc(var(--u) * 0.6) calc(var(--u) * 1.6); color: #2B6CD9 }
+.bubble.bang { font-family: var(--font-pixel); font-weight: 700; padding: calc(var(--u) * 0.6) calc(var(--u) * 1.8); color: #fff; background: var(--err) }
+.room { position: absolute; font-family: var(--font-pixel); font-weight: 700; font-size: max(8px, calc(var(--u) * 4.4)); color: #F7EBD0; text-shadow: 0 2px 0 #2A1A1A; letter-spacing: 0.06em }
+
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px }
+.kpi { background: var(--panel); border: 2px solid var(--bezel-edge); border-radius: 6px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; min-width: 0 }
+.kpi.alert { border-color: #C2620E; background: #2E2018 }
+.kpi .lbl { font-size: 13px; color: var(--muted); display: flex; justify-content: space-between; gap: 8px }
+.kpi .num { font-family: var(--font-pixel); font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1.1 }
+.kpi .sm { font-size: 13px; color: var(--muted) }
+.up { color: var(--up) } .down { color: var(--down) }
+.bar { height: 10px; background: #120E19; border: 2px solid var(--bezel-edge); border-radius: 2px; overflow: hidden }
+.bar i { display: block; height: 100%; background: var(--up); transition: width .4s }
+.bar.alert i { background: var(--down) }
+.conn { display: flex; align-items: center; gap: 8px; font-size: 14px }
+.conn .dot { width: 10px; height: 10px; background: var(--up); flex: none }
+.conn .dot.bad { background: var(--err) } .conn .dot.idle { background: var(--wait) }
+.conn time { margin-left: auto; font-family: var(--font-pixel); font-size: 13px; color: var(--muted); white-space: nowrap }
+
+.sec-h { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 8px }
+.sec-h h2 { margin: 0; font-family: var(--font-pixel); font-size: 24px }
+.sec-h p { margin: 0; font-size: 13px; color: var(--muted) }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 12px }
+.card { all: unset; box-sizing: border-box; cursor: pointer; display: flex; flex-direction: column; gap: 10px; min-width: 0; background: var(--panel); color: var(--fg); font-family: var(--font-body); border: 2px solid var(--bezel-edge); border-radius: 6px; padding: 14px; transition: border-color .15s, transform .15s }
+.card.shadow { border-style: dashed }
+.card.error { border-color: #8A2E33 }
+.card:hover, .card[aria-pressed="true"] { border-color: var(--teal); transform: translateY(-2px) }
+.card:focus-visible { outline: 3px solid var(--teal); outline-offset: 2px }
+.card .top { display: flex; align-items: center; gap: 10px }
+.card canvas { position: static; width: 36px; height: 60px; flex: none; image-rendering: pixelated; background: #2E2540; border-radius: 4px }
+.card .who { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 }
+.card .nm { font-family: var(--font-pixel); font-size: 18px; font-weight: 700 }
+.card .mk { font-size: 12px; color: var(--muted); overflow-wrap: anywhere }
+.card .grp { font-family: var(--font-pixel); font-size: 12px; letter-spacing: 0.08em; padding: 3px 8px; border: 2px solid var(--bezel-edge); border-radius: 4px; color: var(--muted); align-self: flex-start; white-space: nowrap }
+.card.shadow .grp { border-style: dashed }
+.card .row { display: flex; align-items: center; justify-content: space-between; gap: 8px }
+.card .chip { font-size: 13px; padding: 3px 10px; border-radius: 12px; border-width: 2px }
+.card .when { font-size: 12px; color: var(--muted) }
+.pos { background: #120E19; border: 2px solid var(--bezel-edge); border-radius: 4px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; font-family: var(--font-pixel); font-size: 15px; font-variant-numeric: tabular-nums }
+.pos .ln { display: flex; justify-content: space-between; gap: 8px }
+.pos .lv { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; color: var(--muted) }
+.pos.pend { border-style: dashed }
+.idle { border: 2px dashed var(--bezel-edge); border-radius: 4px; padding: 8px 10px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; border-top: 2px solid var(--bezel-edge); padding-top: 8px }
+.stats span { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--muted); min-width: 0 }
+.stats b { font-family: var(--font-pixel); font-size: 16px; font-weight: 500; color: var(--fg); font-variant-numeric: tabular-nums; overflow-wrap: anywhere }
+.stats b.up { color: var(--up) } .stats b.down { color: var(--down) }
+
+.dialog { background: var(--parch); color: var(--parch-ink); border: 4px solid var(--parch-edge); border-radius: 6px; box-shadow: inset 0 0 0 3px #EAD6AE, 0 6px 0 #0E0B14; padding: 16px 18px; min-width: 0 }
+.dialog h2 { margin: 0 0 10px; font-family: var(--font-pixel); font-size: 22px; display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap }
+.dialog h2 small { font-family: var(--font-body); font-size: 13px; font-weight: 600; color: var(--parch-muted) }
+.log { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px }
+.log li { display: grid; grid-template-columns: 70px 112px 84px minmax(0, 1fr); gap: 10px; font-size: 14px; align-items: baseline; border-top: 2px dashed #E2CDA2; padding-top: 6px }
+.log li:first-child { border-top: 0; padding-top: 0 }
+.log li.fresh { animation: pop 1.2s ease-out }
+@keyframes pop { from { background: #FFE9A8 } to { background: transparent } }
+.log time, .log .who { font-family: var(--font-pixel); font-variant-numeric: tabular-nums }
+.log time { color: var(--parch-muted) }
+.log .kind { font-weight: 700; font-size: 13px }
+.log .what { overflow-wrap: anywhere }
+.k-open { color: #1F5FAF } .k-close { color: #1D7A3E } .k-sl { color: #6A5A48 } .k-err { color: #B3261E } .k-rep { color: #0E7C72 }
+.note { font-size: 12px; color: var(--parch-muted); margin: 12px 0 0 }
+.empty { font-size: 14px; color: var(--parch-muted) }
+@media (max-width: 560px) { .log li { grid-template-columns: 52px minmax(0, 1fr) } .log .kind { grid-column: 2 } .log .what { grid-column: 1 / -1 } }
+@media (prefers-reduced-motion: reduce) { .card, .log li.fresh, .bar i { transition: none; animation: none } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Mark2 · Agent <span>Office</span></h1>
+      <p class="sub" id="sub">กำลังโหลดข้อมูลจริงจาก D1…</p>
+    </div>
+    <div class="controls" role="group" aria-label="ควบคุมแอนิเมชัน">
+      <a class="btn" href="/">หน้าหลัก Mark2</a>
+      <button class="btn" id="btn-play" type="button" aria-pressed="false">หยุดชั่วคราว</button>
+      <button class="btn" id="btn-s1" type="button" aria-pressed="true">1x</button>
+      <button class="btn" id="btn-s2" type="button" aria-pressed="false">2x</button>
+      <button class="btn" id="btn-s3" type="button" aria-pressed="false">3x</button>
+    </div>
+  </header>
+
+  <div class="banner" id="banner"></div>
+
+  <section class="kpis" aria-label="ภาพรวมพอร์ต">
+    <div class="kpi"><span class="lbl"><span>Equity พอร์ตสมมติ</span><span>เริ่ม $10,000 · เสี่ยง 1%</span></span><span class="num" id="k-eq">—</span><span class="sm" id="k-today">—</span></div>
+    <div class="kpi" id="k-dd-box"><span class="lbl"><span>Drawdown พอร์ต</span><span>เกณฑ์ลดไม้ 15%</span></span><span class="num" id="k-dd">—</span><span class="bar" id="k-dd-bar" role="img" aria-label="drawdown"><i style="width:0%"></i></span><span class="sm" id="k-dd-txt">—</span></div>
+    <div class="kpi"><span class="lbl">ไม้ที่เปิดอยู่</span><span class="num" id="k-open">—</span><span class="sm" id="k-open-txt">—</span></div>
+    <div class="kpi"><span class="lbl">การเชื่อมต่อ</span>
+      <span class="conn"><span class="dot" id="d-mt5" aria-hidden="true"></span>MT5 · Exness<time id="t-mt5">—</time></span>
+      <span class="conn"><span class="dot" id="d-vps" aria-hidden="true"></span>VPS heartbeat<time id="t-vps">—</time></span>
+      <span class="conn"><span class="dot" id="d-feed" aria-hidden="true"></span>แท่งราคา M15<time id="t-feed">—</time></span>
+    </div>
+  </section>
+
+  <div class="screen">
+    <div class="stage" id="stage">
+      <canvas id="cv" width="384" height="216" role="img" aria-label="ออฟฟิศพิกเซลของ Mark2: AI-GOLD, คู่เทียบสุ่ม, EA ส่งราคา และแผนกวิจัย นั่งประจำโต๊ะ และลุกเดินไปส่งรายงานให้หัวหน้าเมื่อมีเหตุการณ์ใหม่"></canvas>
+      <div class="ov" id="ov" aria-hidden="true"></div>
+    </div>
+  </div>
+
+  <div class="sec-h"><h2>ทีม Agent</h2><p>กดการ์ดเพื่อชี้ว่าคนนั้นนั่งตรงไหนในออฟฟิศ</p></div>
+  <section class="cards" id="cards" aria-label="สถานะแต่ละระบบ"></section>
+
+  <section class="dialog" aria-label="สมุดรายงาน">
+    <h2>สมุดรายงาน · เหตุการณ์ล่าสุด <small id="count">—</small></h2>
+    <ul class="log" id="log"></ul>
+    <p class="note">หน้านี้อ่านอย่างเดียว ดึงข้อมูลใหม่จาก D1 ทุก 45 วินาที เมื่อมีเหตุการณ์ใหม่ (เปิด/ปิดไม้ ตั้งออเดอร์ ขยับ SL แผนถูกปัดตก error หรือรายงานแผนกวิจัย) คนที่เกี่ยวข้องจะลุกเดินไปส่งเอกสารให้หัวหน้า เดินพร้อมกันไม่เกิน 2 คน ที่เหลือเข้าคิว</p>
+  </section>
+</div>
+
+<script>
+(function () {
+  const W = 384, ROW0 = 62, ROW_GAP = 66;
+  let H = 216;
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+  const ov = document.getElementById('ov');
+  const stage = document.getElementById('stage');
+  const $ = id => document.getElementById(id);
+
+  // ---------- characters (palettes from the mockup) ----------
+  const LOOKS = {
+    ai: { hair: '#3B2416', hi: '#5E3B24', skin: '#F6CFA4', shirt: '#E8B22A', shade: '#BF8D12', mug: '#E5484D' },
+    rand: { hair: '#2A2A2A', hi: '#4A4A4A', skin: '#F6CFA4', shirt: '#9AA3AE', shade: '#77818D', mug: '#7C6CE0' },
+    feed: { hair: '#E2C27A', hi: '#F6DEA6', skin: '#F2C29A', shirt: '#2FA88E', shade: '#1E816D', mug: '#F2C230' },
+    scout: { hair: '#1F1F2A', hi: '#3C3C52', skin: '#E3AE86', shirt: '#F07B2C', shade: '#C45D17', mug: '#3E8EF0' },
+    tester: { hair: '#8A4E2A', hi: '#B26C40', skin: '#F6CFA4', shirt: '#7C6CE0', shade: '#5849BC', mug: '#2EC4B6' },
+    auditor: { hair: '#E8E2D6', hi: '#FFFFFF', skin: '#F2C29A', shirt: '#D2475A', shade: '#A8323F', mug: '#2EC4B6' },
+    librarian: { hair: '#5A3A22', hi: '#7C5438', skin: '#D49C74', shirt: '#4F8EE0', shade: '#336EC0', mug: '#E5484D' },
+    report: { hair: '#9A5B3A', hi: '#BE7B55', skin: '#E3AE86', shirt: '#C26E58', shade: '#9B4F3F', mug: '#F2C230' }
+  };
+  const SPARE = Object.values(LOOKS);
+  const BOSS = { x: 160, y: 96, w: 64, hair: '#4A3A30', hi: '#6C5646', skin: '#EDBB90', shirt: '#2E3F6E', shade: '#22305A' };
+  const DESK_W = 46, BOSS_FRONT = { x: 186, y: 118 };
+  const COLS = { m: [14, 74], s: [260, 320] };
+  const ROOM_NAME = { m: 'MARK2 · เทรด', s: 'RESEARCH' };
+  let AISLE_Y = 172;
+
+  const HEAD = ['...oooooo...', '..ohhhhhho..', '.ohhHHhhhho.', 'ohhhhhhhhhho', 'ohssssssssho', 'ossessssesso', 'ossessssesso', 'osrssssssrso', '.osssmmssso.', '..oossssoo..'];
+  const HEAD_SLEEP = HEAD.slice(0, 5).concat(['osssssssssso', 'osddssssddso', 'osrssssssrso', '.ossssssssso', '..oossssoo..']);
+  const HEAD_BACK = HEAD.slice(0, 4).concat(['ohhhhhhhhhho', 'ohhhHhhhhhho', 'ohhhhhhhhhho', 'ohhhhhhhhhho', '.ohhhhhhhho.', '..oossssoo..']);
+  const BODY = ['..occcccco..', '.occcccccco.', 'oscccccccCso', 'oscccccccCso', '.ooccccccoo.', '..opppppPo..'];
+  const BODY_TIE = ['..occttcco..', '.occcttcccco', 'osccctcccCso', 'osccctcccCso', '.ooccccccoo.', '..opppppPo..'];
+  const LEGS = [['..oppooPPo..', '..oppooPPo..', '..obbo.obbo.', '..oooo.oooo.'], ['..oppo.oPPo.', '..oppo.oPo..', '..obbo.obo..', '..oooo.ooo..'], ['..oPPo.oppo.', '..oPo..oppo.', '..obo..obbo.', '..ooo..oooo.']];
+  const BASE = { o: '#2A1A1A', e: '#2A1A1A', m: '#B85A4A', r: '#F29A9C', p: '#3A4766', P: '#2A3450', b: '#3A2A20', d: '#8A5A40', t: '#C93A3A' };
+  const pal = a => Object.assign({}, BASE, { h: a.hair, H: a.hi, s: a.skin, c: a.shirt, C: a.shade });
+  let cur = ctx;
+  function drawRows(rows, x, y, p) { for (let r = 0; r < rows.length; r++) { const row = rows[r]; for (let c = 0; c < row.length; c++) { const col = p[row[c]]; if (col) { cur.fillStyle = col; cur.fillRect(x + c, y + r, 1, 1) } } } }
+  function drawChar(a, x, y, opts) {
+    const p = pal(a);
+    const head = opts.back ? HEAD_BACK : (opts.sleep ? HEAD_SLEEP : HEAD);
+    if (opts.shadow) { cur.fillStyle = 'rgba(30,15,10,0.28)'; cur.fillRect(x + 1, y + 19, 10, 2); cur.fillRect(x + 2, y + 21, 8, 1) }
+    drawRows(head, x, y, p); drawRows(opts.tie ? BODY_TIE : BODY, x, y + 10, p); drawRows(LEGS[opts.frame || 0], x, y + 16, p);
+  }
+
+  // ---------- office layout (grows by rows when a room has more than 4 people) ----------
+  let AGENTS = [], ROWS = [], bg = null, overlay = null, layoutKey = '';
+  function layout(list) {
+    const per = { m: 0, s: 0 };
+    AGENTS = list.map((d, i) => {
+      const room = d.room === 's' ? 's' : 'm', k = per[room]++;
+      const look = LOOKS[d.id] || SPARE[i % SPARE.length];
+      return Object.assign({ id: d.id, name: d.name, room, x: COLS[room][k % 2], y: ROW0 + Math.floor(k / 2) * ROW_GAP, st: d.st, label: d.label, docs: 1 }, look);
+    });
+    const nRows = Math.max(2, Math.ceil(per.m / 2), Math.ceil(per.s / 2));
+    ROWS = Array.from({ length: nRows }, (_, i) => ROW0 + i * ROW_GAP);
+    H = 216 + (nRows - 2) * ROW_GAP; AISLE_Y = H - 44;
+    cv.height = H; ctx.imageSmoothingEnabled = false;
+    stage.style.aspectRatio = W + ' / ' + H;
+    paintBg(); buildOverlay(); fit();
+  }
+  function rect(g, x, y, w, h, c) { g.fillStyle = c; g.fillRect(x, y, w, h) }
+  function paintBg() {
+    bg = document.createElement('canvas'); bg.width = W; bg.height = H;
+    const b = bg.getContext('2d');
+    let seed = 7; const rnd = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280 };
+    for (let y = 34, row = 0; y < H; y += 8, row++) {
+      rect(b, 0, y, W, 8, row % 2 ? '#C28B57' : '#B9824F'); rect(b, 0, y, W, 1, '#8F5E35'); rect(b, 0, y + 1, W, 1, row % 2 ? '#CF9A64' : '#C58E59');
+      for (let x = (row * 19) % 48; x < W; x += 48) rect(b, x, y, 1, 8, '#8F5E35');
+      for (let k = 0; k < 4; k++) { const kx = Math.floor(rnd() * W); rect(b, kx, y + 4, 2, 1, '#9C673C') }
+    }
+    rect(b, 249, 34, W - 249, H - 34, 'rgba(90,140,200,0.07)');
+    rect(b, 148, 82, 88, 66, '#4A2C58'); rect(b, 150, 84, 84, 62, '#7C4E8E'); rect(b, 154, 88, 76, 54, '#6A3E7C');
+    for (let y = 92; y < 140; y += 6) for (let x = 158 + ((y / 6) % 2) * 3; x < 228; x += 6) rect(b, x, y, 2, 2, '#9A6AAE');
+    rect(b, 0, 0, W, 34, '#6F84A6'); for (let x = 0; x < W; x += 8) rect(b, x, 4, 1, 18, '#7A8FB0');
+    rect(b, 0, 0, W, 4, '#55688A'); rect(b, 0, 22, W, 10, '#4E6080'); rect(b, 0, 22, W, 1, '#8CA0C0'); rect(b, 0, 32, W, 2, '#33405A');
+    const gh = H - 88;
+    rect(b, 246, 40, 3, gh, 'rgba(180,225,245,0.45)'); rect(b, 249, 40, 1, gh, 'rgba(255,255,255,0.35)');
+    for (let y = 40; y <= 40 + gh; y += 32) rect(b, 245, y, 5, 3, '#DDE6F0');
+    rect(b, 245, 38 + gh, 5, 3, '#DDE6F0');
+    rect(b, 166, 4, 52, 34, '#3A2414'); rect(b, 168, 6, 48, 30, '#7A4A26');
+    const books = ['#E5484D', '#3E8EF0', '#F2C230', '#2EC4B6', '#7C6CE0', '#F07B2C', '#E8E2D6'];
+    [6, 16, 26].forEach(sy => { rect(b, 168, sy + 9, 48, 1, '#3A2414'); for (let x = 170; x < 214;) { const w = 2 + Math.floor(rnd() * 3); const h = 6 + Math.floor(rnd() * 3); rect(b, x, sy + 9 - h, w, h, books[Math.floor(rnd() * books.length)]); x += w + (rnd() < 0.2 ? 3 : 0) } });
+    rect(b, 128, 6, 28, 18, '#2A1A1A'); rect(b, 129, 7, 26, 16, '#FFFDF6');
+    const pts = [19, 17, 18, 14, 15, 11, 12, 9]; for (let i = 0; i < pts.length - 1; i++) rect(b, 131 + i * 3, pts[i], 3, 1, '#2E9E5B');
+    rect(b, 226, 30, 10, 18, '#2A1A1A'); rect(b, 227, 31, 8, 16, '#DCE3EA'); rect(b, 228, 22, 6, 9, '#8FD0F0'); rect(b, 229, 23, 2, 6, '#C7EBFA'); rect(b, 229, 38, 4, 2, '#3E8EF0');
+    rect(b, 134, 36, 18, 12, '#2A1A1A'); rect(b, 135, 37, 16, 10, '#C9CDD6'); rect(b, 137, 39, 12, 2, '#4A5060'); rect(b, 138, 33, 10, 4, '#FFFDF6');
+    function plant(x, y) {
+      rect(b, x + 1, y + 10, 10, 8, '#2A1A1A'); rect(b, x + 2, y + 11, 8, 6, '#C0643A'); rect(b, x + 2, y + 11, 8, 1, '#D9824F');
+      const g = ['#3A7A30', '#4C9A3E', '#6BB85A']; for (let i = 0; i < 40; i++) rect(b, x + Math.floor(rnd() * 12), y + Math.floor(rnd() * 11), 1, 1, g[Math.floor(rnd() * 3)]);
+    }
+    plant(124, H - 66); plant(232, H - 66); plant(370, 34); plant(370, H - 66);
+  }
+
+  // ---------- dynamic pieces ----------
+  function windowAt(x, t) {
+    rect(ctx, x, 5, 42, 20, '#F1EAD8'); for (let r = 0; r < 16; r++) rect(ctx, x + 2, 7 + r, 38, 1, r < 8 ? '#7EC8F0' : '#A9DDF7');
+    const cx = x + 2 + ((t / 30 + x) % 50) - 10;
+    for (const [dx, dy, w] of [[0, 4, 8], [2, 3, 4], [-2, 5, 12]]) { const sx = Math.max(x + 2, cx + dx), ex = Math.min(x + 40, cx + dx + w); if (ex > sx) rect(ctx, sx, 7 + dy, ex - sx, 1, '#FFFFFF') }
+    rect(ctx, x + 20, 7, 2, 16, '#F1EAD8'); rect(ctx, x + 2, 14, 38, 1, '#F1EAD8'); rect(ctx, x, 25, 42, 2, '#D8CDB4');
+    ctx.fillStyle = 'rgba(255,236,170,0.10)'; ctx.beginPath(); ctx.moveTo(x + 2, 34); ctx.lineTo(x + 40, 34); ctx.lineTo(x + 54, 70); ctx.lineTo(x + 16, 70); ctx.closePath(); ctx.fill();
+  }
+  function clock(x, y) {
+    rect(ctx, x + 1, y, 12, 14, '#2A1A1A'); rect(ctx, x, y + 1, 14, 12, '#2A1A1A'); rect(ctx, x + 2, y + 1, 10, 12, '#FFFDF6'); rect(ctx, x + 1, y + 2, 12, 10, '#FFFDF6');
+    const now = new Date(Date.now() + 7 * 3600e3), cx = x + 7, cy = y + 7;   // Bangkok time
+    const hand = (ang, len, col) => { for (let i = 0; i <= len; i++) rect(ctx, Math.round(cx + Math.sin(ang) * i), Math.round(cy - Math.cos(ang) * i), 1, 1, col) };
+    hand((now.getUTCHours() % 12 + now.getUTCMinutes() / 60) / 12 * Math.PI * 2, 3, '#2A1A1A'); hand(now.getUTCMinutes() / 60 * Math.PI * 2, 5, '#C93A3A');
+  }
+  function partition(x, y) {
+    const px = x - 2, py = y - 24, w = DESK_W + 4;
+    rect(ctx, px, py, w, 18, '#3B4862'); rect(ctx, px + 1, py + 1, w - 2, 16, '#8EA0BE'); rect(ctx, px + 1, py + 1, w - 2, 2, '#B5C3DA');
+    for (let yy = py + 5; yy < py + 16; yy += 3) for (let xx = px + 3 + (yy % 2); xx < px + w - 2; xx += 4) rect(ctx, xx, yy, 1, 1, '#7F92B2');
+    rect(ctx, px + w - 10, py + 5, 4, 4, '#F2D65A'); rect(ctx, px + w - 10, py + 5, 4, 1, '#E0C040');
+  }
+  function chair(x, y, col) { rect(ctx, x + 15, y - 14, 16, 13, '#22222E'); rect(ctx, x + 16, y - 13, 14, 11, col); rect(ctx, x + 16, y - 13, 14, 2, 'rgba(255,255,255,0.18)') }
+  function screen(x, y, st, t, seedN) {
+    rect(ctx, x, y, 14, 11, '#1B1E25'); const sx = x + 1, sy = y + 1;
+    if (st === 'hold' || st === 'boss') {
+      rect(ctx, sx, sy, 12, 8, '#0E2A1E');
+      if (st === 'boss') { for (let i = 0; i < 12; i++) { const v = Math.round(4 + Math.sin((i + t / 8) * 0.9) * 2 + (i / 4)); rect(ctx, sx + i, sy + 8 - Math.min(7, Math.max(1, v)), 1, 1, '#8EF0A0') } }
+      else for (let i = 0; i < 5; i++) { const k = Math.floor(t / 24) + i + seedN; const h = 2 + ((k * 7) % 4); const up = (k * 5) % 3 !== 0; const top = 1 + ((k * 3) % 3); rect(ctx, sx + 1 + i * 2, sy + top, 1, h, up ? '#47E07A' : '#F0645A') }
+    } else if (st === 'wait') {
+      rect(ctx, sx, sy, 12, 8, '#1C2633'); rect(ctx, sx + 1, sy + 2, 7, 1, '#4E6A8C'); rect(ctx, sx + 1, sy + 4, 5, 1, '#4E6A8C'); if (t % 20 < 10) rect(ctx, sx + 7, sy + 4, 1, 2, '#BFD8F2');
+    } else if (st === 'stop') rect(ctx, sx, sy, 12, 8, '#0B0D12');
+    else { rect(ctx, sx, sy, 12, 8, t % 12 < 6 ? '#C83A3A' : '#7A1C1C'); rect(ctx, sx + 5, sy + 1, 2, 4, '#FFFFFF'); rect(ctx, sx + 5, sy + 6, 2, 1, '#FFFFFF') }
+    rect(ctx, x + 6, y + 11, 2, 2, '#1B1E25');
+  }
+  function desk(x, y, w, dark) {
+    const top = dark ? '#A86B3B' : '#D9A066', hi = dark ? '#C4844E' : '#EAB880', front = dark ? '#7A4A26' : '#A86B3B', edge = '#3A2414';
+    rect(ctx, x + 2, y + 18, w, 3, 'rgba(30,15,10,0.22)'); rect(ctx, x, y, w, 18, edge); rect(ctx, x + 1, y + 1, w - 2, 9, top); rect(ctx, x + 1, y + 1, w - 2, 1, hi);
+    rect(ctx, x + 1, y + 10, w - 2, 7, front); rect(ctx, x + 1, y + 16, w - 2, 1, '#5A3418'); rect(ctx, x + 3, y + 12, 6, 3, dark ? '#5E3A1E' : '#8A5530');
+  }
+  function keyboard(x, y) { rect(ctx, x, y, 12, 4, '#2A1A1A'); rect(ctx, x + 1, y + 1, 10, 2, '#E9E6DD'); for (let i = 0; i < 5; i++) rect(ctx, x + 2 + i * 2, y + 1, 1, 1, '#B8B4A8') }
+  function mug(x, y, col, steam, t) {
+    rect(ctx, x, y, 5, 5, '#2A1A1A'); rect(ctx, x + 1, y + 1, 3, 3, col); rect(ctx, x + 5, y + 2, 1, 2, '#2A1A1A');
+    if (steam) { const o = (t >> 2) % 6; ctx.fillStyle = 'rgba(255,255,255,' + (0.6 - o * 0.1) + ')'; ctx.fillRect(x + 2, y - 2 - o, 1, 1); ctx.fillRect(x + 1 + (o % 2), y - 4 - o, 1, 1) }
+  }
+  function papers(x, y, n) { for (let i = 0; i < n; i++) { rect(ctx, x, y - i * 2, 7, 3, '#8A7E66'); rect(ctx, x + 1, y - i * 2, 5, 2, '#FFFDF6') } }
+  function zzz(x, y, t) {
+    const o = (t >> 2) % 14, zc = 'rgba(255,253,246,' + (1 - o / 16) + ')';
+    const Z = (zx, zy) => { ctx.fillStyle = zc; ctx.fillRect(zx, zy, 3, 1); ctx.fillRect(zx + 1, zy + 1, 1, 1); ctx.fillRect(zx, zy + 2, 3, 1) };
+    Z(x + o / 2, y - o); if (o > 6) Z(x + 4 + o / 3, y - o + 6);
+  }
+  function doc(x, y, err) { rect(ctx, x, y, 6, 7, '#2A1A1A'); rect(ctx, x + 1, y + 1, 4, 5, err ? '#F6C1B8' : '#FFFDF6'); rect(ctx, x + 2, y + 2, 2, 1, '#9A8F75'); rect(ctx, x + 2, y + 4, 2, 1, '#9A8F75') }
+
+  // ---------- walking: only for real new events, max 2 at once, the rest queue ----------
+  const sim = { t: 0, walkers: [], queue: [], delivered: 0, bossMsg: '', bossUntil: 0 };
+  const seat = a => ({ x: a.x + 17, y: a.y - 16 });
+  function pathFor(a) { const s = seat(a), side = a.x - 12; return [s, { x: side, y: s.y }, { x: side, y: AISLE_Y }, { x: BOSS_FRONT.x, y: AISLE_Y }, { x: BOSS_FRONT.x, y: BOSS_FRONT.y }] }
+  const short = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
+  const BOSS_REPLY = e => e.kind === 'err' ? 'เดี๋ยวให้ทีมเช็คให้' : e.kind === 'reject' ? 'ผิดกฎ ไปทำแผนใหม่' : e.kind === 'close' ? (/\+\d/.test(e.msg) && !/\+0R$/.test(e.msg) ? 'เยี่ยม บันทึกแล้ว' : 'รับทราบ บันทึกแล้ว') : e.kind === 'pass' ? 'ดีมาก เสนอเจ้าของ' : 'รับทราบ';
+  function step() {
+    const S = sim; S.t++;
+    for (let qi = 0; qi < S.queue.length && S.walkers.length < 2; qi++) {
+      const e = S.queue[qi], a = AGENTS.find(x => x.id === e.agent);
+      if (!a) { S.queue.splice(qi--, 1); continue }
+      if (S.walkers.some(w => w.a === a)) continue;
+      S.queue.splice(qi--, 1);
+      const path = pathFor(a);
+      S.walkers.push({ a, e, path, i: 1, x: path[0].x, y: path[0].y, ph: 'go', wait: 0, msg: short(e.msg, 46), dir: 'down' });
+    }
+    for (const w of S.walkers) {
+      if (w.ph === 'wait') { if (--w.wait <= 0) { w.ph = 'back'; w.path = w.path.slice().reverse(); w.i = 1 } continue }
+      const tg = w.path[w.i], dx = tg.x - w.x, dy = tg.y - w.y;
+      if (Math.abs(dx) + Math.abs(dy) <= 1) {
+        w.x = tg.x; w.y = tg.y; w.i++;
+        if (w.i >= w.path.length) {
+          if (w.ph === 'go') { w.ph = 'wait'; w.wait = 75; S.delivered++; w.a.docs++; S.bossMsg = BOSS_REPLY(w.e); S.bossUntil = S.t + 75; markDelivered(w.e.id) }
+          else w.done = true;
+        }
+      } else if (dx) { w.x += Math.sign(dx); w.dir = dx > 0 ? 'right' : 'left' }
+      else { w.y += Math.sign(dy); w.dir = dy > 0 ? 'down' : 'up' }
+    }
+    S.walkers = S.walkers.filter(w => !w.done);
+  }
+
+  // ---------- overlay ----------
+  const pct = (x, y) => 'left:' + (x / W * 100) + '%;top:' + (y / H * 100) + '%';
+  function el(cls, html, x, y) { const d = document.createElement('div'); d.className = cls; d.innerHTML = html; d.style.cssText = pct(x, y); ov.appendChild(d); return d }
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+  function buildOverlay() {
+    ov.innerHTML = '';
+    overlay = { tags: {}, q: {}, bang: {} };
+    AGENTS.forEach(a => {
+      overlay.tags[a.id] = el('tag', '', a.x - 2, a.y - 31);
+      overlay.q[a.id] = el('bubble q', '?', a.x + 29, a.y - 14); overlay.q[a.id].hidden = true;
+      overlay.bang[a.id] = el('bubble bang', '!', a.x + 29, a.y - 14); overlay.bang[a.id].hidden = true;
+    });
+    overlay.boss = el('tag', '', 148, 60);
+    el('room', ROOM_NAME.m, 4, H - 16); el('room', ROOM_NAME.s, 262, H - 16);
+    overlay.walk = [el('bubble', '', 0, 0), el('bubble', '', 0, 0)]; overlay.walk.forEach(d => d.hidden = true);
+    overlay.bossBubble = el('bubble', '', 206, 78); overlay.bossBubble.hidden = true;
+    refreshTags();
+  }
+  let bossChip = ['boss', '—'];
+  function refreshTags() {
+    if (!overlay) return;
+    AGENTS.forEach(a => { overlay.tags[a.id].innerHTML = '<b>' + esc(a.name) + '</b><span class="chip ' + a.st + '">' + esc(a.label) + '</span>' });
+    overlay.boss.innerHTML = '<b>หัวหน้า · RULES</b><span class="chip ' + bossChip[0] + '">' + esc(bossChip[1]) + '</span>';
+  }
+
+  // ---------- draw ----------
+  let highlight = null;
+  function arrow(x, y, t) { const yy = y - ((t >> 3) % 2); drawRows(['ooooooo', 'oTTTTTo', '.oTTTo.', '..oTo..', '...o...'], x, yy, { o: '#0E3B36', T: '#2EC4B6' }) }
+  function drawWalker(w, t) {
+    const moving = w.ph !== 'wait', frame = moving ? 1 + ((t >> 2) % 2) : 0, bob = moving && (t >> 2) % 2 ? 1 : 0;
+    drawChar(w.a, w.x, w.y - bob, { back: w.dir === 'up' && moving, frame, shadow: true });
+    if (w.ph !== 'back') doc(w.x + (w.dir === 'up' ? 3 : 8), w.y + 11 - bob, w.e.kind === 'err' || w.e.kind === 'reject');
+  }
+  function draw() {
+    if (!bg) return;
+    const t = sim.t;
+    ctx.drawImage(bg, 0, 0);
+    [18, 72, 290].forEach(x => windowAt(x, t));
+    clock(240, 6);
+    for (const w of sim.walkers) {
+      if (w.ph !== 'go') continue;
+      const p = w.path; let acc = 0;
+      for (let i = w.i - 1; i < p.length - 1; i++) {
+        const a = i === w.i - 1 ? { x: w.x, y: w.y } : p[i], c = p[i + 1], len = Math.abs(c.x - a.x) + Math.abs(c.y - a.y);
+        for (let s = 0; s < len; s++, acc++) { if ((acc + t) % 6 !== 0) continue; rect(ctx, a.x + Math.sign(c.x - a.x) * s + 6, a.y + Math.sign(c.y - a.y) * s + 20, 2, 2, 'rgba(46,196,182,0.85)') }
+      }
+      rect(ctx, BOSS_FRONT.x + 4, BOSS_FRONT.y + 21, 4, 2, 'rgba(46,196,182,0.9)');
+    }
+    const walking = new Set(sim.walkers.map(w => w.a.id));
+    const segOne = w => (w.ph === 'go' && w.i <= 1) || (w.ph === 'back' && w.i >= w.path.length - 1);
+    ROWS.forEach(ry => {
+      AGENTS.filter(a => a.y === ry).forEach(a => { partition(a.x, a.y); chair(a.x, a.y, '#4A5578') });
+      if (ry === ROW0 + ROW_GAP) {
+        rect(ctx, 178, 72, 28, 18, '#22222E'); rect(ctx, 179, 73, 26, 16, '#8E2F3A'); rect(ctx, 179, 73, 26, 2, 'rgba(255,255,255,0.2)');
+        drawChar(BOSS, 186, 80 + ((t >> 4) % 2 && sim.t < sim.bossUntil ? 1 : 0), { tie: true });
+        desk(BOSS.x, BOSS.y, BOSS.w, true); screen(BOSS.x + 4, BOSS.y - 10, 'boss', t, 0);
+        rect(ctx, BOSS.x + 24, BOSS.y + 12, 16, 3, '#2A1A1A'); rect(ctx, BOSS.x + 25, BOSS.y + 12, 14, 2, '#E8C25A');
+        papers(BOSS.x + 50, BOSS.y + 6, Math.min(6, 1 + sim.delivered));
+        rect(ctx, BOSS.x + 40, BOSS.y + 3, 6, 4, '#2A1A1A'); rect(ctx, BOSS.x + 41, BOSS.y + 4, 4, 2, '#3E8EF0');
+      }
+      AGENTS.filter(a => a.y === ry && !walking.has(a.id)).forEach(a => { const s = seat(a); drawChar(a, s.x, s.y, { sleep: a.st === 'stop' }) });
+      sim.walkers.filter(w => w.a.y === ry && segOne(w)).forEach(w => drawWalker(w, t));
+      AGENTS.filter(a => a.y === ry).forEach((a, k) => {
+        desk(a.x, a.y, DESK_W, false); screen(a.x + 3, a.y - 10, a.st, t, k * 3 + (a.room === 's' ? 2 : 0)); keyboard(a.x + 17, a.y + 3);
+        mug(a.x + 37, a.y + 2, a.mug, a.st === 'hold', t + k * 5); papers(a.x + 30, a.y + 6, 1 + (a.docs % 3));
+        if (a.st === 'hold' && !walking.has(a.id)) { const f = (t >> 2) % 2; rect(ctx, a.x + 19 + f * 2, a.y + 2, 2, 1, a.skin); rect(ctx, a.x + 25 - f * 2, a.y + 2, 2, 1, a.skin) }
+        if (a.st === 'stop') zzz(a.x + 30, a.y - 20, t);
+      });
+    });
+    sim.walkers.filter(w => !segOne(w)).forEach(w => drawWalker(w, t));
+    if (highlight) {
+      const w = sim.walkers.find(v => v.a.id === highlight), a = AGENTS.find(v => v.id === highlight);
+      if (a) { const p = w ? { x: w.x, y: w.y } : seat(a); arrow(p.x + 2, p.y - 9, t) }
+    }
+    if (!overlay) return;
+    AGENTS.forEach((a, i) => {
+      overlay.q[a.id].hidden = !(a.st === 'wait' && !walking.has(a.id) && ((t + i * 47) % 220) < 40);
+      overlay.bang[a.id].hidden = a.st !== 'error' || walking.has(a.id) || (t % 24) >= 16;
+    });
+    overlay.walk.forEach((d, i) => {
+      const w = sim.walkers[i], talk = w && (w.ph === 'wait' || (w.ph === 'go' && w.i <= 2));
+      d.hidden = !talk; if (talk) { d.textContent = w.msg; d.style.cssText = pct(Math.min(w.x + 13, W - 150), w.y - 2) }
+    });
+    overlay.bossBubble.hidden = !(sim.t < sim.bossUntil);
+    if (!overlay.bossBubble.hidden) overlay.bossBubble.textContent = sim.bossMsg;
+  }
+
+  // ---------- data ----------
+  const WALK = new Set(['open', 'order', 'close', 'cancel', 'sl', 'reject', 'err', 'stop', 'rep', 'idea', 'pass', 'fail']);
+  const KIND = { open: ['เปิดไม้', 'k-open'], order: ['ตั้งออเดอร์', 'k-open'], close: ['ปิดไม้', 'k-close'], cancel: ['ยกเลิก', 'k-sl'], sl: ['ขยับ SL', 'k-sl'],
+    reject: ['ปัดตก', 'k-err'], err: ['ERROR', 'k-err'], warn: ['เตือน', 'k-err'], stop: ['หยุด', 'k-err'], plan: ['แผน', 'k-rep'], rep: ['รายงาน', 'k-rep'],
+    idea: ['ไอเดีย', 'k-rep'], pass: ['ผ่าน', 'k-close'], fail: ['ไม่ผ่าน', 'k-sl'], start: ['เริ่มงาน', 'k-rep'], info: ['ข้อมูล', 'k-rep'] };
+  let D = null, seenId = null, freshIds = new Set(), deliveredIds = new Set();
+  const fmtUsd = x => (x < 0 ? '-' : '') + '$' + Math.abs(x).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fmtPx = x => x === null || x === undefined ? '—' : (+x).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const sgn = x => (x > 0 ? '+' : '') + x;
+  function bkk(ms) { return new Date(ms + 7 * 3600e3) }
+  function when(ms) {
+    if (!ms) return '—';
+    const d = bkk(ms), n = bkk(Date.now()), hm = String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0');
+    if (d.toISOString().slice(0, 10) === n.toISOString().slice(0, 10)) return hm;
+    const M = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+    return d.getUTCDate() + ' ' + M[d.getUTCMonth()] + ' ' + hm;
+  }
+  function ago(ms) {
+    if (!ms) return 'ยังไม่มีข้อมูล';
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return s + ' วิที่แล้ว'; if (s < 3600) return Math.floor(s / 60) + ' นาทีที่แล้ว'; if (s < 86400) return Math.floor(s / 3600) + ' ชม.ที่แล้ว'; return Math.floor(s / 86400) + ' วันที่แล้ว';
+  }
+  function markDelivered(id) { deliveredIds.add(id); renderLog() }
+  function nameOf(id) { if (id === 'boss') return 'RULES'; if (id === 'sys') return 'SYSTEM'; const a = (D && D.agents || []).find(x => x.id === id); return a ? a.name : id }
+
+  function renderKpis() {
+    const k = D.kpi;
+    $('k-eq').textContent = fmtUsd(k.equity);
+    const td = $('k-today'); td.textContent = (k.today_usd >= 0 ? '+' : '-') + fmtUsd(Math.abs(k.today_usd)).replace('-', '') + ' วันนี้ (' + sgn(k.today_pct) + '%) · ' + sgn(k.today_r) + 'R';
+    td.className = 'sm ' + (k.today_usd > 0 ? 'up' : k.today_usd < 0 ? 'down' : '');
+    const over = k.dd_pct >= k.dd_limit, warn = over || k.paused;
+    $('k-dd').textContent = (k.dd_pct > 0 ? '-' : '') + k.dd_pct.toFixed(1) + '%';
+    const bar = $('k-dd-bar'); bar.classList.toggle('alert', warn); bar.querySelector('i').style.width = Math.min(100, k.dd_pct / k.dd_limit * 100) + '%';
+    bar.setAttribute('aria-label', 'drawdown ' + k.dd_pct.toFixed(1) + '% จากเกณฑ์ ' + k.dd_limit + '%');
+    $('k-dd-box').classList.toggle('alert', warn);
+    const t = $('k-dd-txt');
+    t.textContent = over ? 'เกินเกณฑ์ 15% · โหมดลดไม้ครึ่ง (Mark2 เป็น paper ระบบยังไม่ลดให้เอง) · แพ้ติด ' + k.streak + '/' + k.streak_limit
+      : k.paused ? 'หยุดเปิดไม้ใหม่ตามกฎ · แพ้ติด ' + k.streak + '/' + k.streak_limit
+      : 'ปกติ ใช้ไม้เต็ม · แพ้ติด ' + k.streak + '/' + k.streak_limit;
+    t.className = 'sm ' + (warn ? 'down' : 'up');
+    const o = k.open; $('k-open').textContent = o.ai + o.rand;
+    $('k-open-txt').textContent = 'AI ' + o.ai + ' ไม้ · Twin ' + o.rand + ' ไม้' + (o.ai_pending ? ' · ออเดอร์รอ ' + o.ai_pending : '');
+    bossChip = k.paused ? ['stop', 'หยุดตามกฎ'] : over ? ['warn', 'DD ' + k.dd_pct.toFixed(1) + '% เกินเกณฑ์'] : ['boss', 'DD ' + k.dd_pct.toFixed(1) + '% · แพ้ติด ' + k.streak + '/' + k.streak_limit];
+  }
+  function renderConn() {
+    if (!D) return;
+    const h = D.hb, now = Date.now();
+    const set = (id, ms, limit, idle) => { const dot = $('d-' + id); dot.className = 'dot' + (idle ? ' idle' : !ms || now - ms > limit ? ' bad' : ''); $('t-' + id).textContent = idle ? 'ตลาดปิด · ' + ago(ms) : ago(ms) };
+    set('mt5', h.mt5, 5 * 60e3, false); set('vps', h.vps, 5 * 60e3, false); set('feed', h.feed, 20 * 60e3, !D.market_open);
+  }
+  function renderCards() {
+    const wrap = $('cards'), pinned = highlight && [...wrap.querySelectorAll('.card')].some(c => c._pinned) ? highlight : null;
+    wrap.innerHTML = '';
+    D.agents.forEach(d => {
+      const a = AGENTS.find(x => x.id === d.id) || d;
+      const btn = document.createElement('button'); btn.type = 'button';
+      btn.className = 'card' + (d.grp !== 'MARK2' ? ' shadow' : '') + (d.st === 'error' ? ' error' : '');
+      btn.setAttribute('aria-pressed', String(pinned === d.id)); btn._pinned = pinned === d.id; btn._id = d.id;
+      btn.setAttribute('aria-label', d.name + ' ' + d.label + ' แสดงตำแหน่งในออฟฟิศ');
+      const av = document.createElement('canvas'); av.width = 12; av.height = 20; av.setAttribute('aria-hidden', 'true');
+      cur = av.getContext('2d'); drawChar(a, 0, 0, { sleep: d.st === 'stop' }); cur = ctx;
+      const top = document.createElement('span'); top.className = 'top';
+      const who = document.createElement('span'); who.className = 'who'; who.innerHTML = '<span class="nm"></span><span class="mk"></span>';
+      who.querySelector('.nm').textContent = d.name; who.querySelector('.mk').textContent = d.mk;
+      const grp = document.createElement('span'); grp.className = 'grp'; grp.textContent = d.grp;
+      top.append(av, who, grp);
+      const row = document.createElement('span'); row.className = 'row';
+      const chip = document.createElement('span'); chip.className = 'chip ' + d.st; chip.textContent = d.label;
+      const wh = document.createElement('span'); wh.className = 'when'; wh.textContent = 'ล่าสุด ' + when(d.last);
+      row.append(chip, wh);
+      let mid;
+      if (d.pos) {
+        const p = d.pos; mid = document.createElement('span'); mid.className = 'pos';
+        mid.innerHTML = '<span class="ln"><span></span><b></b></span><span class="lv"><span></span><span></span><span></span></span>';
+        mid.querySelector('.ln span').textContent = p.side + ' @ ' + fmtPx(p.entry);
+        const pl = mid.querySelector('.ln b');
+        pl.textContent = p.float_r === null ? '—' : (p.float_usd >= 0 ? '+' : '-') + '$' + Math.abs(p.float_usd).toFixed(2) + ' · ' + sgn(p.float_r) + 'R';
+        pl.className = p.float_r > 0 ? 'up' : p.float_r < 0 ? 'down' : '';
+        const lv = mid.querySelectorAll('.lv span');
+        lv[0].textContent = 'SL ' + fmtPx(p.sl) + (p.sl !== p.sl_init ? ' (เริ่ม ' + fmtPx(p.sl_init) + ')' : ''); lv[1].textContent = 'TP ' + fmtPx(p.tp);
+        lv[2].textContent = p.float_oz === null ? '' : sgn(p.float_oz) + ' $/oz';
+      } else if (d.pending) {
+        const p = d.pending; mid = document.createElement('span'); mid.className = 'pos pend';
+        mid.innerHTML = '<span class="ln"><span></span><b></b></span><span class="lv"><span></span><span></span></span>';
+        mid.querySelector('.ln span').textContent = 'รอ ' + p.side + ' ' + p.type.toUpperCase() + ' @ ' + fmtPx(p.entry);
+        mid.querySelector('.ln b').textContent = 'หมดอายุ ' + when(p.expires);
+        const lv = mid.querySelectorAll('.lv span'); lv[0].textContent = 'SL ' + fmtPx(p.sl); lv[1].textContent = 'TP ' + fmtPx(p.tp);
+      } else { mid = document.createElement('span'); mid.className = 'idle'; mid.textContent = d.note }
+      const stats = document.createElement('span'); stats.className = 'stats';
+      d.stats.forEach(([l, v, c]) => { const sp = document.createElement('span'); sp.textContent = l; const bb = document.createElement('b'); bb.textContent = v; if (c) bb.className = c; sp.appendChild(bb); stats.appendChild(sp) });
+      btn.append(top, row, mid);
+      if ((d.pos || d.pending) && d.note && d.id === 'ai') { const n = document.createElement('span'); n.className = 'idle'; n.textContent = d.note; btn.append(n) }
+      btn.append(stats);
+      btn.addEventListener('mouseenter', () => { if (!btn._pinned) highlight = d.id });
+      btn.addEventListener('mouseleave', () => { if (!btn._pinned && highlight === d.id) highlight = pinnedId() });
+      btn.addEventListener('click', () => {
+        const on = !btn._pinned;
+        wrap.querySelectorAll('.card').forEach(c => { c._pinned = false; c.setAttribute('aria-pressed', 'false') });
+        btn._pinned = on; btn.setAttribute('aria-pressed', String(on)); highlight = on ? d.id : null;
+      });
+      wrap.appendChild(btn);
+    });
+    function pinnedId() { const p = [...wrap.querySelectorAll('.card')].find(c => c._pinned); return p ? p._id : null }
+  }
+  function renderLog() {
+    if (!D) return;
+    const ul = $('log'); ul.innerHTML = '';
+    const list = D.events.slice(0, 25);
+    if (!list.length) { const li = document.createElement('li'); li.className = 'empty'; li.textContent = 'ยังไม่มีเหตุการณ์'; ul.appendChild(li) }
+    list.forEach(e => {
+      const li = document.createElement('li'); if (freshIds.has(e.id)) li.className = 'fresh';
+      const tm = document.createElement('time'); tm.textContent = when(e.t);
+      const who = document.createElement('span'); who.className = 'who'; who.textContent = nameOf(e.agent);
+      const k = KIND[e.kind] || KIND.info;
+      const kind = document.createElement('span'); kind.className = 'kind ' + k[1]; kind.textContent = k[0] + (deliveredIds.has(e.id) ? ' ✓' : '');
+      const what = document.createElement('span'); what.className = 'what'; what.textContent = e.msg;
+      li.append(tm, who, kind, what); ul.appendChild(li);
+    });
+    freshIds.clear();
+    $('count').textContent = 'วันนี้ ' + D.events_today + ' เหตุการณ์ · ส่งถึงหัวหน้าแล้ว ' + sim.delivered + ' ฉบับ';
+  }
+  async function load() {
+    try {
+      const r = await fetch('/api/office', { credentials: 'same-origin', cache: 'no-store' });
+      if (r.status === 401) { const b = $('banner'); b.innerHTML = 'ต้องเข้าสู่ระบบก่อน · <a href="/">ไปหน้าหลัก Mark2 เพื่อใส่รหัสผ่าน</a> แล้วกลับมาที่หน้านี้'; b.classList.add('show'); $('sub').textContent = 'ยังไม่ได้เข้าสู่ระบบ'; return }
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const d = await r.json(); D = d; $('banner').classList.remove('show');
+      const key = d.agents.map(a => a.id + a.room).join(',');
+      if (key !== layoutKey) { layoutKey = key; layout(d.agents) }
+      d.agents.forEach(x => { const a = AGENTS.find(y => y.id === x.id); if (a) { a.st = x.st; a.label = x.label } });
+      // new events since the last poll -> fresh in the log; walkable ones queue a walk (the agent's own, or a boss note)
+      const maxId = d.events.reduce((m, e) => Math.max(m, e.id), 0);
+      if (seenId === null) seenId = maxId;
+      else {
+        d.events.filter(e => e.id > seenId).sort((a, b) => a.id - b.id).forEach(e => {
+          freshIds.add(e.id);
+          if (AGENTS.some(a => a.id === e.agent) && WALK.has(e.kind)) sim.queue.push(e);
+          else if (e.agent === 'boss') { sim.bossMsg = short(e.msg, 40); sim.bossUntil = sim.t + 120 }
+        });
+        seenId = Math.max(seenId, maxId);
+      }
+      renderKpis(); refreshTags(); renderConn(); renderCards(); renderLog();
+      $('sub').textContent = 'ข้อมูลจริงจาก D1 · อัปเดต ' + when(d.now) + ' น. · ดึงใหม่ทุก 45 วินาที · อ่านอย่างเดียว';
+    } catch (e) {
+      const b = $('banner'); b.textContent = 'ดึงข้อมูลไม่สำเร็จ (' + e.message + ') จะลองใหม่อัตโนมัติ'; b.classList.add('show');
+    }
+  }
+
+  // ---------- loop & controls ----------
+  let speed = 1, paused = false, last = 0, accT = 0;
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const playBtn = $('btn-play');
+  function setPaused(p) { paused = p; playBtn.textContent = p ? 'เล่นต่อ' : 'หยุดชั่วคราว'; playBtn.setAttribute('aria-pressed', String(p)) }
+  playBtn.addEventListener('click', () => setPaused(!paused));
+  [1, 2, 3].forEach(n => $('btn-s' + n).addEventListener('click', () => { speed = n; [1, 2, 3].forEach(m => $('btn-s' + m).setAttribute('aria-pressed', String(m === n))) }));
+  if (reduce) setPaused(true);
+  function fit() { ov.style.setProperty('--u', (stage.clientWidth / W) + 'px') }
+  if (window.ResizeObserver) new ResizeObserver(fit).observe(stage); else window.addEventListener('resize', fit);
+
+  function frame(ts) {
+    if (!last) last = ts;
+    const dt = Math.min(100, ts - last); last = ts;
+    if (!paused) { accT += dt * speed; while (accT >= 33) { step(); accT -= 33 } }
+    draw(); requestAnimationFrame(frame);
+  }
+  load(); setInterval(load, 45000); setInterval(renderConn, 5000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) load() });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
