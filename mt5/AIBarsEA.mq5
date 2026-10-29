@@ -8,7 +8,7 @@
 //| token. Allow the Worker URL in Tools > Options > Expert Advisors.|
 //+------------------------------------------------------------------+
 #property copyright "AI-GOLD"
-#property version   "1.00"
+#property version   "1.01"
 #property strict
 
 input string WorkerURL = "https://ai-gold.tevez7549.workers.dev";
@@ -17,8 +17,9 @@ input int    M15Bars   = 300;
 input int    H1Bars    = 400;
 
 datetime lastM15 = 0;
+datetime lastTry = 0;
 
-int OnInit() { EventSetTimer(15); Print("AIBarsEA v1.00 started on ", _Symbol, " (bars only, no trading)"); return INIT_SUCCEEDED; }
+int OnInit() { EventSetTimer(15); Print("AIBarsEA v1.01 started on ", _Symbol, " (bars only, no trading)"); return INIT_SUCCEEDED; }
 void OnDeinit(const int r) { EventKillTimer(); }
 void OnTick() { Step(); }
 void OnTimer() { Step(); }
@@ -38,6 +39,8 @@ string BarsJson(ENUM_TIMEFRAMES tf, int n) {
 void Step() {
    datetime t = iTime(_Symbol, PERIOD_M15, 0);
    if(t == 0 || t == lastM15) return;
+   if(TimeCurrent() - lastTry < 60) return;   // retry at most once a minute after a failure
+   lastTry = TimeCurrent();
    double spread = SymbolInfoDouble(_Symbol, SYMBOL_ASK) - SymbolInfoDouble(_Symbol, SYMBOL_BID);
    string body = StringFormat("{\"symbol\":\"%s\",\"spread\":%.3f,\"m15\":%s,\"h1\":%s}", _Symbol, spread, BarsJson(PERIOD_M15, M15Bars), BarsJson(PERIOD_H1, H1Bars));
    char data[], res[]; string hdr;
@@ -45,6 +48,8 @@ void Step() {
    string h = "Content-Type: application/json\r\nAuthorization: Bearer " + Token + "\r\n";
    ResetLastError();
    int code = WebRequest("POST", WorkerURL + "/ea/bars", h, 15000, data, res, hdr);
-   if(code == 200) { lastM15 = t; }
-   else Print("AIBarsEA post failed code=", code, " err=", GetLastError(), " ", CharArrayToString(res, 0, 200));
+   int err = GetLastError();
+   if(code == 200) { lastM15 = t; return; }
+   string msg = ArraySize(res) > 0 ? CharArrayToString(res, 0, MathMin(ArraySize(res), 200), CP_UTF8) : "";
+   PrintFormat("AIBarsEA post failed code=%d err=%d %s%s", code, err, msg, err == 4014 ? " -> add the URL in Tools > Options > Expert Advisors (Allow WebRequest)" : "");
 }
