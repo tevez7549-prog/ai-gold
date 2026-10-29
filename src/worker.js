@@ -156,7 +156,8 @@ Prices are broker bid prices, server time. Hard rules are enforced by code; a pl
 - pending orders expire after at most ${RULES.maxExpiryH} hours; buy_stop above price, sell_stop below, buy_limit below, sell_limit above
 - move_sl may only tighten the stop of the open trade; no averaging, no adding to a position
 You may (and often should) choose "wait". Prefer clear structure (trend, swing levels, ranges, breakouts/retests) over prediction.
-Use the lessons list: they are notes you wrote after earlier trades. If a trade just closed, write one short lesson (Thai) about it.`;
+Use the lessons list: they are notes you wrote after earlier trades. If a trade just closed, write one short lesson (Thai) about it.
+Always reply by calling the submit_plan tool exactly once; never answer in plain text.`;
 const TOOL = {
   name: 'submit_plan', description: 'Submit the plan for this H1 bar.',
   input_schema: { type: 'object', required: ['bias', 'market_view', 'levels', 'action', 'reasoning'], properties: {
@@ -170,17 +171,25 @@ const TOOL = {
     reasoning: { type: 'string', description: 'Thai, 2-4 sentences' },
     lesson: { type: 'string', description: 'Thai, one sentence, only when just_closed is not null' } } },
 };
+// This model does not accept a forced tool_choice, so tool_choice is 'auto' and the prompt requires the tool call;
+// if the reply has no tool call, ask once more in the same conversation.
 async function askClaude(env, ctxObj) {
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify({ model: MODEL, max_tokens: 1500, system: SYSTEM, tools: [TOOL], tool_choice: { type: 'tool', name: 'submit_plan' },
-      messages: [{ role: 'user', content: 'Market context (JSON):\n' + JSON.stringify(ctxObj) }] }),
-  });
-  const d = await r.json();
-  if (!r.ok) throw new Error(`Claude API ${r.status}: ${JSON.stringify(d).slice(0, 300)}`);
-  const tu = (d.content || []).find(x => x.type === 'tool_use');
-  if (!tu) throw new Error('no plan in reply');
-  return { plan: tu.input, usage: d.usage || {} };
+  const messages = [{ role: 'user', content: 'Market context (JSON):\n' + JSON.stringify(ctxObj) + '\n\nAnswer ONLY by calling submit_plan exactly once.' }];
+  const usage = { input_tokens: 0, output_tokens: 0 };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: MODEL, max_tokens: 4000, system: SYSTEM, tools: [TOOL], tool_choice: { type: 'auto' }, messages }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(`Claude API ${r.status}: ${JSON.stringify(d).slice(0, 300)}`);
+    usage.input_tokens += d.usage?.input_tokens || 0; usage.output_tokens += d.usage?.output_tokens || 0;
+    const tu = (d.content || []).find(x => x.type === 'tool_use');
+    if (tu) return { plan: tu.input, usage };
+    messages.push({ role: 'assistant', content: d.content && d.content.length ? d.content : [{ type: 'text', text: '(no answer)' }] });
+    messages.push({ role: 'user', content: 'Call submit_plan now with your plan (action "wait" is fine).' });
+  }
+  throw new Error('no plan in reply');
 }
 
 // ---------------- hard rules ----------------
@@ -219,7 +228,13 @@ async function decide(env, h1, m15, spread) {
   const cx = context(h1, m15, spread, live, recent, L.items.slice(-15), needLesson ? { id: needLesson.id, side: needLesson.side > 0 ? 'buy' : 'sell',
     entry: needLesson.fill, sl_init: needLesson.sl_init, tp: needLesson.tp, exit: needLesson.exit, r: needLesson.r, why: needLesson.exit_reason, opened: iso(needLesson.fill_t), closed: iso(needLesson.exit_t) } : null);
   let plan, usage;
-  try { ({ plan, usage } = await askClaude(env, cx)); } catch (e) { await event(env, 'ERROR', e.message); return; }
+  const barH1 = h1[h1.length - 1].t;
+  try { ({ plan, usage } = await askClaude(env, cx)); } catch (e) {
+    // remember the failure; eaBars retries this H1 bar on the next M15 posts (at most 3 tries per bar)
+    const rt = (await getDoc(env, 'state', 'retry')) || {};
+    await setDoc(env, 'state', 'retry', { bar: barH1, tries: rt.bar === barH1 ? (rt.tries || 0) + 1 : 1 });
+    await event(env, 'ERROR', e.message); return;
+  }
   const v = validate(plan, price, spread, atrH1, live);
   const d = await env.DB.prepare('INSERT INTO decisions(time,bar_t,model,tokens_in,tokens_out,plan,valid,note) VALUES(?,?,?,?,?,?,?,?)')
     .bind(nowIso(), h1[h1.length - 1].t, MODEL, usage.input_tokens || 0, usage.output_tokens || 0, JSON.stringify({ ...plan, price, atr: r2(atrH1) }), v.ok ? 1 : 0, v.ok ? null : v.why).run();
@@ -258,8 +273,13 @@ async function eaBars(req, env, ctx) {
   const newH1 = h1[h1.length - 1].t > st.lastH1;
   const nst = { lastM15: m15[m15.length - 1].t, lastH1: h1[h1.length - 1].t, spread, symbol: e.symbol || '', at: nowIso() };
   await setDoc(env, 'state', 'feed', nst);
-  if (newH1 && st.lastH1) ctx.waitUntil(decide(env, h1, m15, spread));
-  return json({ ok: true, decided: newH1 && !!st.lastH1 });
+  let go = newH1 && !!st.lastH1;
+  if (!go && st.lastH1) {   // retry a bar whose decision failed (API error), max 3 tries
+    const rt = await getDoc(env, 'state', 'retry');
+    go = !!rt && rt.bar === h1[h1.length - 1].t && (rt.tries || 0) < 3;
+  }
+  if (go) ctx.waitUntil(decide(env, h1, m15, spread));
+  return json({ ok: true, decided: go });
 }
 
 // ---------------- web API ----------------
