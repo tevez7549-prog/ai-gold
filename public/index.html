@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI-GOLD</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#262b35; --tx:#e6e8ec; --mut:#8b93a3; --up:#26a69a; --dn:#ef5350; --acc:#f5b942; }
+  * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--tx); font:14px/1.5 system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif; }
+  header { display:flex; gap:12px; align-items:center; padding:12px 16px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; } .pill { padding:2px 10px; border-radius:999px; background:var(--line); font-size:12px; color:var(--mut); }
+  .pill.ok { color:#0f1115; background:var(--up); } .pill.bad { color:#fff; background:var(--dn); }
+  main { display:grid; grid-template-columns: minmax(0,1fr) 380px; gap:12px; padding:12px 16px; }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
+  .card h2 { font-size:14px; margin:0 0 8px; color:var(--mut); font-weight:600; }
+  #chart { height:460px; } .row { display:flex; gap:12px; flex-wrap:wrap; }
+  .kpi { flex:1; min-width:140px; } .kpi b { font-size:20px; display:block; } .mut { color:var(--mut); } .up { color:var(--up); } .dn { color:var(--dn); }
+  table { width:100%; border-collapse:collapse; font-size:13px; } td, th { padding:5px 6px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+  th { color:var(--mut); font-weight:500; } .scroll { max-height:420px; overflow:auto; }
+  .plan { white-space:pre-wrap; } .tag { font-size:11px; padding:1px 6px; border-radius:4px; background:var(--line); }
+  button { background:var(--line); color:var(--tx); border:1px solid #333a46; border-radius:6px; padding:6px 12px; cursor:pointer; }
+  #login { max-width:320px; margin:80px auto; } input { width:100%; padding:8px; border-radius:6px; border:1px solid var(--line); background:#0b0d11; color:var(--tx); margin:8px 0; }
+</style>
+</head>
+<body>
+<div id="login" class="card" hidden>
+  <h2 id="lt">เข้าสู่ระบบ AI-GOLD</h2>
+  <input id="pw" type="password" placeholder="รหัสผ่าน">
+  <button id="lb">เข้าสู่ระบบ</button> <span id="le" class="dn"></span>
+</div>
+<div id="app" hidden>
+<header>
+  <h1>AI-GOLD</h1><span class="pill">ทดสอบแบบ paper · ไม่ส่งออเดอร์จริง · แยกจาก Mark1</span>
+  <span id="st" class="pill"></span><span id="feed" class="pill"></span>
+  <span style="flex:1"></span><button id="pause"></button>
+</header>
+<main>
+  <section>
+    <div class="card"><h2>กราฟ H1 · เส้นที่ AI ตีไว้ และแผนล่าสุด</h2><div id="chart"></div>
+      <div class="mut" style="font-size:12px;margin-top:6px">เส้นเหลือง = แนวที่ AI ตี · ฟ้า = จุดเข้า · แดง = SL · เขียว = TP · เส้นประ = EMA50 / EMA200</div></div>
+    <div class="row" style="margin-top:12px">
+      <div class="card kpi"><h2>AI</h2><div id="kai"></div></div>
+      <div class="card kpi"><h2>เทียบ: ทิศสุ่ม SL/TP เดียวกัน</h2><div id="krand"></div></div>
+      <div class="card kpi"><h2>เกณฑ์ผ่าน (ตั้งไว้ก่อนเริ่ม)</h2><div class="mut" style="font-size:12px">≥ 50 ไม้ · AI เฉลี่ย ≥ +0.10R · ดีกว่าทิศสุ่ม ≥ 0.15R · ไม่มีไม้ผิดกฎ</div><div id="kpass"></div></div>
+    </div>
+    <div class="card" style="margin-top:12px"><h2>ไม้ (paper)</h2><div class="scroll"><table id="tt"></table></div></div>
+  </section>
+  <aside>
+    <div class="card"><h2>แผนล่าสุด</h2><div id="plan" class="plan"></div></div>
+    <div class="card" style="margin-top:12px"><h2>บทเรียนที่ AI จดไว้</h2><div id="les" class="scroll" style="max-height:220px"></div></div>
+    <div class="card" style="margin-top:12px"><h2>บันทึกการตัดสินใจทุกชั่วโมง</h2><div id="dec" class="scroll"></div></div>
+    <div class="card" style="margin-top:12px"><h2>ระบบ</h2><div id="sys" class="mut" style="font-size:12px"></div></div>
+  </aside>
+</main>
+</div>
+<script>
+const $ = id => document.getElementById(id), esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const tz = 7 * 3600;   // show Bangkok time on the chart axis
+const fmtT = ms => new Date(ms + tz * 1000).toISOString().slice(5, 16).replace('T', ' ');
+const sideTh = s => s > 0 ? '<span class="up">Buy</span>' : '<span class="dn">Sell</span>';
+const actTh = { wait: 'รอ', buy_stop: 'Buy Stop', sell_stop: 'Sell Stop', buy_limit: 'Buy Limit', sell_limit: 'Sell Limit', buy_market: 'Buy ทันที', sell_market: 'Sell ทันที', move_sl: 'ขยับ SL', close: 'ปิดไม้', cancel_pending: 'ยกเลิกออเดอร์' };
+let chart, candles, e50, e200, priceLines = [];
+async function api(p, o) { const r = await fetch(p, o); if (r.status === 401) { showLogin(); throw new Error('login'); } return r.json(); }
+async function showLogin() { const s = await (await fetch('/api/status')).json(); $('app').hidden = true; $('login').hidden = false; if (s.setup) $('lt').textContent = 'ตั้งรหัสผ่านครั้งแรก'; $('lb').onclick = async () => {
+  const r = await fetch('/api/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: $('pw').value, setup: s.setup }) });
+  const d = await r.json(); if (d.ok) { $('login').hidden = true; load(); } else $('le').textContent = d.error || 'ผิดพลาด'; }; }
+function emaArr(v, n) { const k = 2 / (n + 1); let e = null; return v.map(x => e = e === null ? x : e + k * (x - e)); }
+function draw(d) {
+  if (!chart) {
+    chart = LightweightCharts.createChart($('chart'), { layout: { background: { color: '#171a21' }, textColor: '#c9ced8' }, grid: { vertLines: { color: '#20242c' }, horzLines: { color: '#20242c' } },
+      timeScale: { timeVisible: true }, rightPriceScale: { borderColor: '#262b35' }, autoSize: true });
+    candles = chart.addCandlestickSeries({ upColor: '#26a69a', downColor: '#ef5350', borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350' });
+    e50 = chart.addLineSeries({ color: '#7aa2f7', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
+    e200 = chart.addLineSeries({ color: '#bb9af7', lineWidth: 1, lineStyle: 2, priceLineVisible: false, lastValueVisible: false });
+  }
+  const b = d.bars.map(x => ({ time: x.t / 1000 + tz, open: x.o, high: x.h, low: x.l, close: x.c }));
+  candles.setData(b); const c = d.bars.map(x => x.c), a50 = emaArr(c, 50), a200 = emaArr(c, 200);
+  e50.setData(b.map((x, i) => ({ time: x.time, value: a50[i] }))); e200.setData(b.map((x, i) => ({ time: x.time, value: a200[i] })));
+  priceLines.forEach(l => candles.removePriceLine(l)); priceLines = [];
+  const last = d.decisions.find(x => x.plan && x.plan.levels);
+  if (last) for (const L of last.plan.levels || []) priceLines.push(candles.createPriceLine({ price: L.price, color: '#f5b942', lineWidth: 1, lineStyle: 0, title: (L.kind === 'support' ? 'รับ ' : L.kind === 'resistance' ? 'ต้าน ' : '') + (L.note || '').slice(0, 18) }));
+  const live = d.trades.find(t => t.kind === 'ai' && (t.status === 'open' || t.status === 'pending'));
+  if (live) { const add = (p, col, t) => priceLines.push(candles.createPriceLine({ price: p, color: col, lineWidth: 2, lineStyle: 1, title: t }));
+    add(live.fill ?? live.entry, '#7dcfff', (live.status === 'pending' ? 'รอ ' : 'เข้า ') + (live.side > 0 ? 'Buy' : 'Sell')); add(live.sl, '#ef5350', 'SL'); add(live.tp, '#26a69a', 'TP'); }
+  const marks = [];
+  for (const t of d.trades.filter(t => t.kind === 'ai' && t.fill_t).slice().reverse()) {
+    marks.push({ time: Math.floor(t.fill_t / 3600e3) * 3600 + tz, position: t.side > 0 ? 'belowBar' : 'aboveBar', color: t.side > 0 ? '#26a69a' : '#ef5350', shape: t.side > 0 ? 'arrowUp' : 'arrowDown', text: t.r != null ? (t.r > 0 ? '+' : '') + t.r + 'R' : '' });
+  }
+  const t0 = b.length ? b[0].time : 0; candles.setMarkers(marks.filter(m => m.time >= t0).sort((x, y) => x.time - y.time));
+}
+function kpi(s) { if (!s.n) return '<span class="mut">ยังไม่มีไม้ปิด</span>';
+  return `<b class="${s.avg_r > 0 ? 'up' : 'dn'}">${s.avg_r > 0 ? '+' : ''}${s.avg_r}R/ไม้</b>${s.n} ไม้ · ชนะ ${s.win}% · รวม ${s.sum_r}R · PF ${s.pf ?? '-'}`; }
+async function load() {
+  const d = await api('/api/view'); $('app').hidden = false; $('login').hidden = true;
+  $('st').textContent = !d.key ? 'ยังไม่ได้ใส่ API key' : d.paused ? 'AI หยุดอยู่' : 'AI ทำงาน'; $('st').className = 'pill ' + (!d.key || d.paused ? 'bad' : 'ok');
+  $('feed').textContent = d.feed ? `ราคาล่าสุด ${d.feed.at} UTC (${d.feed.symbol})` : 'ยังไม่มีราคาจาก EA';
+  $('pause').textContent = d.paused ? 'เปิด AI ต่อ' : 'หยุด AI'; $('pause').onclick = async () => { await api('/api/pause', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paused: !d.paused }) }); load(); };
+  draw(d);
+  $('kai').innerHTML = kpi(d.score.ai); $('krand').innerHTML = kpi(d.score.rand);
+  const a = d.score.ai, r = d.score.rand;
+  $('kpass').innerHTML = a.n >= 50 ? (a.avg_r >= 0.10 && a.avg_r - (r.avg_r ?? 0) >= 0.15 ? '<b class="up">ผ่าน</b>' : '<b class="dn">ยังไม่ผ่าน</b>') : `<span class="mut">เก็บข้อมูล ${a.n}/50 ไม้</span>`;
+  const p = d.decisions[0];
+  $('plan').innerHTML = p ? `<div class="mut">${esc(p.time)} UTC · ราคา ${p.plan.price} · ATR ${p.plan.atr}</div>
+    <div style="margin:6px 0"><b>${actTh[p.plan.action] || esc(p.plan.action)}</b> ${p.plan.entry ? '@ ' + p.plan.entry : ''} ${p.plan.sl ? '· SL ' + p.plan.sl : ''} ${p.plan.tp ? '· TP ' + p.plan.tp : ''} ${p.plan.confidence != null ? '· มั่นใจ ' + p.plan.confidence + '%' : ''}
+    ${p.valid ? '' : '<div class="dn">ไม่ผ่านกฎ: ' + esc(p.note) + '</div>'}</div>
+    <div><span class="tag">${p.plan.bias === 'up' ? 'มองขึ้น' : p.plan.bias === 'down' ? 'มองลง' : 'กลาง'}</span> ${esc(p.plan.market_view)}</div>
+    <div style="margin-top:6px">${esc(p.plan.reasoning)}</div>` : '<span class="mut">รอการตัดสินใจครั้งแรก (ทุกครั้งที่ปิดแท่ง H1)</span>';
+  $('les').innerHTML = d.lessons.length ? d.lessons.map(l => `<div style="margin-bottom:6px"><span class="tag ${l.r > 0 ? 'up' : 'dn'}">${l.r > 0 ? '+' : ''}${l.r}R</span> ${esc(l.text)} <span class="mut" style="font-size:11px">${esc(l.t)}</span></div>`).join('') : '<span class="mut">ยังไม่มี</span>';
+  $('dec').innerHTML = '<table>' + d.decisions.map(x => `<tr><td class="mut" style="white-space:nowrap">${fmtT(x.bar_t)}</td><td><b>${actTh[x.plan.action] || esc(x.plan.action)}</b>${x.valid ? '' : ' <span class="dn">(ผิดกฎ)</span>'}<div class="mut">${esc(x.plan.reasoning)}</div></td></tr>`).join('') + '</table>';
+  $('tt').innerHTML = '<tr><th>#</th><th>ชนิด</th><th>ทิศ</th><th>สถานะ</th><th>เข้า</th><th>SL</th><th>TP</th><th>ออก</th><th>R</th><th>เหตุ</th></tr>' + d.trades.map(t => `<tr><td>${t.id}</td>
+    <td>${t.kind === 'ai' ? 'AI' : '<span class="mut">สุ่ม</span>'}</td><td>${sideTh(t.side)} <span class="mut">${t.otype}</span></td><td>${t.status}</td>
+    <td>${t.fill ?? t.entry}<div class="mut" style="font-size:11px">${t.fill_t ? fmtT(t.fill_t) : ''}</div></td><td>${t.sl_init}${t.sl !== t.sl_init ? '→' + t.sl : ''}</td><td>${t.tp}</td>
+    <td>${t.exit ?? ''}<div class="mut" style="font-size:11px">${t.exit_t ? fmtT(t.exit_t) : ''}</div></td><td class="${t.r > 0 ? 'up' : t.r < 0 ? 'dn' : ''}">${t.r ?? ''}</td><td class="mut">${esc(t.exit_reason || '')}${t.lesson ? '<div>' + esc(t.lesson) + '</div>' : ''}</td></tr>`).join('');
+  const cost = d.usage.tokens_in * 3e-6 + d.usage.tokens_out * 15e-6;
+  $('sys').innerHTML = `โมเดล ${esc(d.model)} · ตัดสินใจไปแล้ว ${d.usage.decisions} ครั้ง · token เข้า ${d.usage.tokens_in.toLocaleString()} / ออก ${d.usage.tokens_out.toLocaleString()} (ประมาณ $${cost.toFixed(2)})<br>
+    กฎ: ไม้เดียว · SL ${d.rules.minRiskAtr}-${d.rules.maxRiskAtr} ATR · TP ≥ ${d.rules.minRR}R · ออเดอร์รอ ≤ ${d.rules.maxExpiryH} ชม. · แพ้ติด ${d.rules.maxLossStreakPause} ไม้ = หยุดเอง<br>
+    ${d.events.slice(0, 5).map(e => `${esc(e.time)} ${esc(e.level)} ${esc(e.msg)}`).join('<br>')}`;
+}
+load().catch(() => {}); setInterval(() => { if (!$('app').hidden) load().catch(() => {}); }, 60000);
+</script>
+</body>
+</html>

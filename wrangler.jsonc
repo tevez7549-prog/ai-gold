@@ -1,0 +1,11 @@
+{
+  "name": "ai-gold",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-09-01",
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": ["/api/*", "/ea/*"] },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "ai-gold", "database_id": "eb4f7293-d7ca-4a09-b2c7-5a3142e92025" }
+  ],
+  "observability": { "enabled": true }
+  // secret ANTHROPIC_API_KEY is set in the Cloudflare dashboard (never in this repo)
+}
