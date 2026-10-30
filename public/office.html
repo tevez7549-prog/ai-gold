@@ -128,8 +128,8 @@ h1 span { color: var(--teal) }
   <div class="banner" id="banner"></div>
 
   <section class="kpis" aria-label="ภาพรวมพอร์ต">
-    <div class="kpi"><span class="lbl"><span>Equity พอร์ตสมมติ</span><span>เริ่ม $10,000 · เสี่ยง 1%</span></span><span class="num" id="k-eq">—</span><span class="sm" id="k-today">—</span></div>
-    <div class="kpi" id="k-dd-box"><span class="lbl"><span>Drawdown พอร์ต</span><span>เกณฑ์ลดไม้ 15%</span></span><span class="num" id="k-dd">—</span><span class="bar" id="k-dd-bar" role="img" aria-label="drawdown"><i style="width:0%"></i></span><span class="sm" id="k-dd-txt">—</span></div>
+    <div class="kpi"><span class="lbl"><span>Equity พอร์ตสมมติ</span><span>เริ่ม $10,000 · AI เลือกเสี่ยง 0.25–2%</span></span><span class="num" id="k-eq">—</span><span class="sm" id="k-today">—</span></div>
+    <div class="kpi" id="k-dd-box"><span class="lbl"><span>Drawdown พอร์ต</span><span>ลดไม้ 15% · หยุด 30%</span></span><span class="num" id="k-dd">—</span><span class="bar" id="k-dd-bar" role="img" aria-label="drawdown"><i style="width:0%"></i></span><span class="sm" id="k-dd-txt">—</span></div>
     <div class="kpi"><span class="lbl">ไม้ที่เปิดอยู่</span><span class="num" id="k-open">—</span><span class="sm" id="k-open-txt">—</span></div>
     <div class="kpi"><span class="lbl">การเชื่อมต่อ</span>
       <span class="conn"><span class="dot" id="d-mt5" aria-hidden="true"></span>MT5 · Exness<time id="t-mt5">—</time></span>
@@ -450,17 +450,17 @@ h1 span { color: var(--teal) }
     td.className = 'sm ' + (k.today_usd > 0 ? 'up' : k.today_usd < 0 ? 'down' : '');
     const over = k.dd_pct >= k.dd_limit, warn = over || k.paused;
     $('k-dd').textContent = (k.dd_pct > 0 ? '-' : '') + k.dd_pct.toFixed(1) + '%';
-    const bar = $('k-dd-bar'); bar.classList.toggle('alert', warn); bar.querySelector('i').style.width = Math.min(100, k.dd_pct / k.dd_limit * 100) + '%';
-    bar.setAttribute('aria-label', 'drawdown ' + k.dd_pct.toFixed(1) + '% จากเกณฑ์ ' + k.dd_limit + '%');
+    const bar = $('k-dd-bar'); bar.classList.toggle('alert', warn); bar.querySelector('i').style.width = Math.min(100, k.dd_pct / k.dd_stop * 100) + '%';
+    bar.setAttribute('aria-label', 'drawdown ' + k.dd_pct.toFixed(1) + '% (ลดไม้ที่ ' + k.dd_limit + '%, หยุดที่ ' + k.dd_stop + '%)');
     $('k-dd-box').classList.toggle('alert', warn);
     const t = $('k-dd-txt');
-    t.textContent = over ? 'เกินเกณฑ์ 15% · โหมดลดไม้ครึ่ง (Mark2 เป็น paper ระบบยังไม่ลดให้เอง) · แพ้ติด ' + k.streak + '/' + k.streak_limit
-      : k.paused ? 'หยุดเปิดไม้ใหม่ตามกฎ · แพ้ติด ' + k.streak + '/' + k.streak_limit
-      : 'ปกติ ใช้ไม้เต็ม · แพ้ติด ' + k.streak + '/' + k.streak_limit;
+    t.textContent = k.paused ? 'หยุดเปิดไม้ใหม่ (DD ถึง ' + k.dd_stop + '% หรือกดหยุด) รอคนตรวจ'
+      : over ? 'โหมดลดไม้ครึ่งทำงานอยู่ (DD ≥ ' + k.dd_limit + '%) · หยุดที่ ' + k.dd_stop + '%'
+      : 'ปกติ ใช้ไม้เต็ม · ลดไม้ที่ ' + k.dd_limit + '% · หยุดที่ ' + k.dd_stop + '%';
     t.className = 'sm ' + (warn ? 'down' : 'up');
     const o = k.open; $('k-open').textContent = o.ai + o.rand;
     $('k-open-txt').textContent = 'AI ' + o.ai + ' ไม้ · Twin ' + o.rand + ' ไม้' + (o.ai_pending ? ' · ออเดอร์รอ ' + o.ai_pending : '');
-    bossChip = k.paused ? ['stop', 'หยุดตามกฎ'] : over ? ['warn', 'DD ' + k.dd_pct.toFixed(1) + '% เกินเกณฑ์'] : ['boss', 'DD ' + k.dd_pct.toFixed(1) + '% · แพ้ติด ' + k.streak + '/' + k.streak_limit];
+    bossChip = k.paused ? ['stop', 'หยุดตามกฎ'] : over ? ['warn', 'DD ' + k.dd_pct.toFixed(1) + '% เกินเกณฑ์'] : ['boss', 'DD ' + k.dd_pct.toFixed(1) + '% ปกติ'];
   }
   function renderConn() {
     if (!D) return;
@@ -492,7 +492,7 @@ h1 span { color: var(--teal) }
       if (d.pos) {
         const p = d.pos; mid = document.createElement('span'); mid.className = 'pos';
         mid.innerHTML = '<span class="ln"><span></span><b></b></span><span class="lv"><span></span><span></span><span></span></span>';
-        mid.querySelector('.ln span').textContent = p.side + ' @ ' + fmtPx(p.entry);
+        mid.querySelector('.ln span').textContent = p.side + ' @ ' + fmtPx(p.entry) + (p.risk_pct ? ' · เสี่ยง ' + p.risk_pct + '%' : '') + (p.more > 0 ? ' · +' + p.more + ' ไม้' : '');
         const pl = mid.querySelector('.ln b');
         pl.textContent = p.float_r === null ? '—' : (p.float_usd >= 0 ? '+' : '-') + '$' + Math.abs(p.float_usd).toFixed(2) + ' · ' + sgn(p.float_r) + 'R';
         pl.className = p.float_r > 0 ? 'up' : p.float_r < 0 ? 'down' : '';

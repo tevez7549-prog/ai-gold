@@ -101,21 +101,27 @@ async function load() {
   $('kai').innerHTML = kpi(d.score.ai); $('krand').innerHTML = kpi(d.score.rand);
   const a = d.score.ai, r = d.score.rand;
   $('kpass').innerHTML = a.n >= 50 ? (a.avg_r >= 0.10 && a.avg_r - (r.avg_r ?? 0) >= 0.15 ? '<b class="up">ผ่าน</b>' : '<b class="dn">ยังไม่ผ่าน</b>') : `<span class="mut">เก็บข้อมูล ${a.n}/50 ไม้</span>`;
+  // v1 plans have plan.action; v2 plans (2026-10-30) have orders/modify/close/cancel lists
+  const actOf = pl => pl.action ? (actTh[pl.action] || esc(pl.action)) : (() => { const o = [];
+    (pl.orders || []).forEach(x => o.push(`${x.side === 'buy' ? 'ซื้อ' : 'ขาย'} ${x.type}${x.entry ? ' @ ' + x.entry : ''} · SL ${x.sl} · TP ${x.tp} · เสี่ยง ${x.risk_pct}%`));
+    (pl.modify || []).forEach(x => o.push(`ปรับ #${x.id}${x.sl ? ' SL ' + x.sl : ''}${x.tp ? ' TP ' + x.tp : ''}`));
+    (pl.close || []).forEach(x => o.push(`ปิด #${x.id}`)); (pl.cancel || []).forEach(x => o.push(`ยกเลิก #${x.id}`));
+    return o.length ? esc(o.join(' | ')) : 'รอ'; })();
   const p = d.decisions[0];
   $('plan').innerHTML = p ? `<div class="mut">${esc(p.time)} UTC · ราคา ${p.plan.price} · ATR ${p.plan.atr}</div>
-    <div style="margin:6px 0"><b>${actTh[p.plan.action] || esc(p.plan.action)}</b> ${p.plan.entry ? '@ ' + p.plan.entry : ''} ${p.plan.sl ? '· SL ' + p.plan.sl : ''} ${p.plan.tp ? '· TP ' + p.plan.tp : ''} ${p.plan.confidence != null ? '· มั่นใจ ' + p.plan.confidence + '%' : ''}
+    <div style="margin:6px 0"><b>${actOf(p.plan)}</b> ${p.plan.action && p.plan.entry ? '@ ' + p.plan.entry : ''} ${p.plan.action && p.plan.sl ? '· SL ' + p.plan.sl : ''} ${p.plan.action && p.plan.tp ? '· TP ' + p.plan.tp : ''} ${p.plan.confidence != null ? '· มั่นใจ ' + p.plan.confidence + '%' : ''}
     ${p.valid ? '' : '<div class="dn">ไม่ผ่านกฎ: ' + esc(p.note) + '</div>'}</div>
     <div><span class="tag">${p.plan.bias === 'up' ? 'มองขึ้น' : p.plan.bias === 'down' ? 'มองลง' : 'กลาง'}</span> ${esc(p.plan.market_view)}</div>
     <div style="margin-top:6px">${esc(p.plan.reasoning)}</div>` : '<span class="mut">รอการตัดสินใจครั้งแรก (ทุกครั้งที่ปิดแท่ง H1)</span>';
   $('les').innerHTML = d.lessons.length ? d.lessons.map(l => `<div style="margin-bottom:6px"><span class="tag ${l.r > 0 ? 'up' : 'dn'}">${l.r > 0 ? '+' : ''}${l.r}R</span> ${esc(l.text)} <span class="mut" style="font-size:11px">${esc(l.t)}</span></div>`).join('') : '<span class="mut">ยังไม่มี</span>';
-  $('dec').innerHTML = '<table>' + d.decisions.map(x => `<tr><td class="mut" style="white-space:nowrap">${fmtT(x.bar_t)}</td><td><b>${actTh[x.plan.action] || esc(x.plan.action)}</b>${x.valid ? '' : ' <span class="dn">(ผิดกฎ)</span>'}<div class="mut">${esc(x.plan.reasoning)}</div></td></tr>`).join('') + '</table>';
+  $('dec').innerHTML = '<table>' + d.decisions.map(x => `<tr><td class="mut" style="white-space:nowrap">${fmtT(x.bar_t)}</td><td><b>${actOf(x.plan)}</b>${x.valid ? '' : ' <span class="dn">(บางรายการผิดกฎ: ' + esc(x.note || '') + ')</span>'}<div class="mut">${esc(x.plan.reasoning)}</div></td></tr>`).join('') + '</table>';
   $('tt').innerHTML = '<tr><th>#</th><th>ชนิด</th><th>ทิศ</th><th>สถานะ</th><th>เข้า</th><th>SL</th><th>TP</th><th>ออก</th><th>R</th><th>เหตุ</th></tr>' + d.trades.map(t => `<tr><td>${t.id}</td>
     <td>${t.kind === 'ai' ? 'AI' : '<span class="mut">สุ่ม</span>'}</td><td>${sideTh(t.side)} <span class="mut">${t.otype}</span></td><td>${t.status}</td>
     <td>${t.fill ?? t.entry}<div class="mut" style="font-size:11px">${t.fill_t ? fmtT(t.fill_t) : ''}</div></td><td>${t.sl_init}${t.sl !== t.sl_init ? '→' + t.sl : ''}</td><td>${t.tp}</td>
-    <td>${t.exit ?? ''}<div class="mut" style="font-size:11px">${t.exit_t ? fmtT(t.exit_t) : ''}</div></td><td class="${t.r > 0 ? 'up' : t.r < 0 ? 'dn' : ''}">${t.r ?? ''}</td><td class="mut">${esc(t.exit_reason || '')}${t.lesson ? '<div>' + esc(t.lesson) + '</div>' : ''}</td></tr>`).join('');
+    <td>${t.exit ?? ''}<div class="mut" style="font-size:11px">${t.exit_t ? fmtT(t.exit_t) : ''}</div></td><td class="${t.r > 0 ? 'up' : t.r < 0 ? 'dn' : ''}">${t.r ?? ''}</td><td class="mut">${esc(t.exit_reason || '')}${t.lesson ? '<div>' + esc(t.lesson) + '</div>' : ''}${t.review ? '<details><summary>บทวิเคราะห์ไม้นี้</summary><div style="white-space:pre-wrap">' + esc(t.review) + '</div></details>' : ''}${t.risk_pct ? '<div style="font-size:11px">เสี่ยง ' + t.risk_pct + '%' + (t.mfe != null && t.fill && t.sl_init ? ' · ไปได้ไกลสุด ' + (t.mfe / Math.abs(t.fill - t.sl_init)).toFixed(2) + 'R' : '') + '</div>' : ''}</td></tr>`).join('');
   const cost = d.usage.tokens_in * 3e-6 + d.usage.tokens_out * 15e-6;
   $('sys').innerHTML = `โมเดล ${esc(d.model)} · ตัดสินใจไปแล้ว ${d.usage.decisions} ครั้ง · token เข้า ${d.usage.tokens_in.toLocaleString()} / ออก ${d.usage.tokens_out.toLocaleString()} (ประมาณ $${cost.toFixed(2)})<br>
-    กฎ: ไม้เดียว · SL ${d.rules.minRiskAtr}-${d.rules.maxRiskAtr} ATR · TP ≥ ${d.rules.minRR}R · ออเดอร์รอ ≤ ${d.rules.maxExpiryH} ชม. · แพ้ติด ${d.rules.maxLossStreakPause} ไม้ = หยุดเอง<br>
+    กฎ v2: ต้องมี SL+TP (ขยับได้) · เสี่ยง ${d.rules.riskMin}-${d.rules.riskMax}%/ไม้ · ความเสี่ยงรวม ≤ ${d.rules.openRiskCap}% · DD ${d.rules.ddHalf}% ลดไม้ครึ่ง · DD ${d.rules.ddStop}% หยุด · ออเดอร์รอ ≤ ${d.rules.maxExpiryH} ชม.<br>
     ${d.events.slice(0, 5).map(e => `${esc(e.time)} ${esc(e.level)} ${esc(e.msg)}`).join('<br>')}`;
 }
 load().catch(() => {}); setInterval(() => { if (!$('app').hidden) load().catch(() => {}); }, 60000);

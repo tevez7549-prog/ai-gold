@@ -6,15 +6,21 @@
 //    -> HARD RULES (code, not the AI) validate it -> paper order. Benchmark twin: random side, same SL/TP distances, opened when the AI fills.
 //  - /api/* (password, PBKDF2) for the web page in /public
 // Pre-registered evaluation (2026-10-29): >= 50 closed AI trades; AI avg R >= +0.10 AND >= twin avg R + 0.15; no rule violations executed.
+// Rules v2 (owner 2026-10-30 08:00, "loose rules, goal-based"): several trades at once, the AI picks risk 0.25-2% of a virtual $10,000
+// account per trade (lower when unsure), every trade needs SL + TP and both may be moved any time (manage profits, don't let winners
+// turn into losers), DD >= 15% from peak halves the risk of new trades, DD >= 30% stops new trades (latched until a person resumes),
+// total open risk <= 6%. After every closed trade the AI writes a detailed review (why won/lost, could it have made more / lost less).
 import { ema, atr, rsi, adx, swings, agg } from './ind.js';
 
 const MODEL = 'claude-sonnet-5-5';
 const RULES = {
-  maxOpen: 1,              // one AI trade (pending or open) at a time
-  minRiskAtr: 0.4, maxRiskAtr: 3.0,   // SL distance in H1 ATR
-  minRR: 1.0,              // TP distance >= 1 x SL distance
-  maxExpiryH: 6,           // pending orders live at most 6 hours
-  maxLossStreakPause: 8,   // 8 losses in a row -> stop new AI entries until a person resumes
+  startEquity: 10000,
+  riskMin: 0.25, riskMax: 2.0,   // % of equity per trade, chosen by the AI
+  openRiskCap: 6.0,              // % of equity at risk across all open + pending trades (to their CURRENT stops)
+  ddHalf: 15, ddStop: 30,        // % drawdown from peak: halve new risk / stop new trades
+  maxLive: 6,                    // open + pending AI trades at once (sanity)
+  maxNewPerBar: 3,
+  maxExpiryH: 48,                // pending orders live at most 48 h
 };
 
 const enc = new TextEncoder();
@@ -96,6 +102,9 @@ function stepTrade(tr, b, spread) {
     return ch;
   }
   if (tr.status !== 'open') return false;
+  // max favourable / adverse excursion in price ($/oz), for the AI's post-trade review
+  const fav = s > 0 ? b.h - tr.fill : tr.fill - (b.l + spread), adv = s > 0 ? tr.fill - b.l : (b.h + spread) - tr.fill;
+  if (b.t >= tr.fill_t) { if (fav > (tr.mfe || 0)) { tr.mfe = fav; ch = true; } if (adv > (tr.mae || 0)) { tr.mae = adv; ch = true; } }
   if ((s > 0 && b.l <= tr.sl) || (s < 0 && b.h + spread >= tr.sl)) return close(tr, tr.sl, b.t, tr.sl * s > tr.sl_init * s ? 'trail' : 'sl');
   if (b.t > tr.fill_t && ((s > 0 && b.h >= tr.tp) || (s < 0 && b.l + spread <= tr.tp))) return close(tr, tr.tp, b.t, 'tp');
   return ch;
@@ -105,13 +114,14 @@ function close(tr, px, t, why) {
   tr.r = Math.round(tr.side * (px - tr.fill) / Math.abs(tr.fill - tr.sl_init) * 1000) / 1000; return true;
 }
 async function saveTrade(env, tr) {
-  await env.DB.prepare('UPDATE trades SET status=?, sl=?, fill_t=?, fill=?, exit_t=?, exit=?, r=?, exit_reason=?, lesson=? WHERE id=?')
-    .bind(tr.status, tr.sl, tr.fill_t ?? null, tr.fill ?? null, tr.exit_t ?? null, tr.exit ?? null, tr.r ?? null, tr.exit_reason ?? null, tr.lesson ?? null, tr.id).run();
+  await env.DB.prepare('UPDATE trades SET status=?, sl=?, tp=?, fill_t=?, fill=?, exit_t=?, exit=?, r=?, exit_reason=?, lesson=?, mfe=?, mae=? WHERE id=?')
+    .bind(tr.status, tr.sl, tr.tp, tr.fill_t ?? null, tr.fill ?? null, tr.exit_t ?? null, tr.exit ?? null, tr.r ?? null, tr.exit_reason ?? null, tr.lesson ?? null,
+      tr.mfe ?? null, tr.mae ?? null, tr.id).run();
 }
 async function insertTrade(env, tr) {
-  const r = await env.DB.prepare(`INSERT INTO trades(kind,status,side,otype,created,created_t,expiry_t,entry,sl,sl_init,tp,fill_t,fill,decision_id,twin_of)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(tr.kind, tr.status, tr.side, tr.otype, nowIso(), tr.created_t, tr.expiry_t, tr.entry, tr.sl, tr.sl_init, tr.tp,
-    tr.fill_t ?? null, tr.fill ?? null, tr.decision_id ?? null, tr.twin_of ?? null).run();
+  const r = await env.DB.prepare(`INSERT INTO trades(kind,status,side,otype,created,created_t,expiry_t,entry,sl,sl_init,tp,fill_t,fill,decision_id,twin_of,risk_pct,tp_init)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(tr.kind, tr.status, tr.side, tr.otype, nowIso(), tr.created_t, tr.expiry_t, tr.entry, tr.sl, tr.sl_init, tr.tp,
+    tr.fill_t ?? null, tr.fill ?? null, tr.decision_id ?? null, tr.twin_of ?? null, tr.risk_pct ?? 1, tr.tp).run();
   tr.id = r.meta.last_row_id; return tr;
 }
 async function runEngine(env, m15, spread, sinceT) {
@@ -132,7 +142,7 @@ async function runEngine(env, m15, spread, sinceT) {
           const side = crypto.getRandomValues(new Uint8Array(1))[0] & 1 ? 1 : -1, dSL = Math.abs(tr.entry - tr.sl_init), dTP = Math.abs(tr.tp - tr.entry);
           const bid = tr.side > 0 ? tr.fill - spread : tr.fill, fill = side > 0 ? bid + spread : bid;
           const tw = await insertTrade(env, { kind: 'rand', status: 'open', side, otype: 'market', created_t: tr.fill_t, expiry_t: tr.fill_t, entry: fill,
-            sl: fill - side * dSL, sl_init: fill - side * dSL, tp: fill + side * dTP, fill_t: tr.fill_t, fill, decision_id: tr.decision_id, twin_of: tr.id });
+            sl: fill - side * dSL, sl_init: fill - side * dSL, tp: fill + side * dTP, fill_t: tr.fill_t, fill, decision_id: tr.decision_id, twin_of: tr.id, risk_pct: tr.risk_pct });
           await tradeEvent(env, tw, 'fill');
           live.push(tw);
         }
@@ -143,48 +153,86 @@ async function runEngine(env, m15, spread, sinceT) {
   return closed;
 }
 
+// ---------------- account (virtual $10,000, compounding by each trade's risk %) ----------------
+// equity = start x PRODUCT(1 + risk_pct/100 x R) over closed AI trades; floating = open trades marked at the last price.
+function account(closedAsc, openTrades, bid, spread) {
+  let eq = RULES.startEquity, peak = eq;
+  for (const t of closedAsc) { eq *= 1 + (t.risk_pct ?? 1) / 100 * t.r; peak = Math.max(peak, eq); }
+  let floatPct = 0, openRisk = 0;
+  for (const t of openTrades) {
+    const risk0 = Math.abs((t.fill ?? t.entry) - t.sl_init) || 1, rp = t.risk_pct ?? 1;
+    const curRisk = t.side * ((t.fill ?? t.entry) - t.sl) / risk0;          // 1 = initial risk, <=0 = stop at/past entry
+    openRisk += rp * Math.max(0, curRisk);
+    if (t.status === 'open' && bid) floatPct += rp * (t.side > 0 ? bid - t.fill : t.fill - (bid + spread)) / risk0;
+  }
+  const eqNow = eq * (1 + floatPct / 100), pk = Math.max(peak, eqNow);
+  const dd = (pk - eqNow) / pk * 100;
+  return { equity: r2(eqNow), closed_equity: r2(eq), peak: r2(pk), dd_pct: r2(dd), open_risk_pct: r2(openRisk),
+    mode: dd >= RULES.ddStop ? 'stopped' : dd >= RULES.ddHalf ? 'half' : 'normal' };
+}
+
 // ---------------- context for the AI ----------------
-function context(h1, m15, spread, live, recent, lessons, lastLesson) {
+function context(h1, m15, spread, live, recent, lessons, toReview, acct) {
   const c = h1.map(b => b.c), A = atr(h1), R = rsi(c), X = adx(h1), E20 = ema(c, 20), E50 = ema(c, 50), E200 = ema(c, 200);
   const i = h1.length - 1, H4 = agg(h1, 4), D1 = agg(h1, 24), e50h4 = ema(H4.map(b => b.c), 50);
   const sw = swings(h1, 3, 8), swH4 = swings(H4, 2, 6);
   const fmt = b => `${iso(b.t)},${b.o.toFixed(2)},${b.h.toFixed(2)},${b.l.toFixed(2)},${b.c.toFixed(2)}`;
   const last = m15[m15.length - 1];
+  const rr = (t, v) => v == null ? null : r2(v / (Math.abs(t.fill - t.sl_init) || 1));
   return {
     now_bar: iso(h1[i].t), price: last.c, spread: r2(spread),
+    account: { ...acct, risk_rule: `risk per new trade ${RULES.riskMin}-${RULES.riskMax}% of equity` + (acct.mode === 'half' ? ' (HALVED by code: DD >= 15%)' : '') +
+      (acct.mode === 'stopped' ? ' — NEW TRADES BLOCKED (DD >= 30%)' : ''), open_risk_cap_pct: RULES.openRiskCap },
     indicators_h1: { ema20: r2(E20[i]), ema50: r2(E50[i]), ema200: r2(E200[i]), atr14: r2(A[i]), rsi14: r2(R[i]), adx14: r2(X[i] ?? 0),
       ema50_h4: r2(e50h4[e50h4.length - 1]) },
     swings_h1: { highs: sw.hi.map(x => [iso(x.t), r2(x.p)]), lows: sw.lo.map(x => [iso(x.t), r2(x.p)]) },
     swings_h4: { highs: swH4.hi.map(x => [iso(x.t), r2(x.p)]), lows: swH4.lo.map(x => [iso(x.t), r2(x.p)]) },
     d1_last20: D1.slice(-20).map(fmt), h4_last40: H4.slice(-40).map(fmt), h1_last72: h1.slice(-72).map(fmt), m15_last16: m15.slice(-16).map(fmt),
-    open_or_pending: live.map(t => ({ id: t.id, status: t.status, side: t.side > 0 ? 'buy' : 'sell', type: t.otype, entry: t.fill ?? t.entry, sl: t.sl, sl_init: t.sl_init, tp: t.tp,
-      opened: t.fill_t ? iso(t.fill_t) : null, expires: t.status === 'pending' ? iso(t.expiry_t) : null })),
-    recent_results: recent.map(t => ({ side: t.side > 0 ? 'buy' : 'sell', opened: iso(t.fill_t), r: t.r, exit: t.exit_reason })),
-    lessons, just_closed: lastLesson,
+    my_trades: live.map(t => ({ id: t.id, status: t.status, side: t.side > 0 ? 'buy' : 'sell', type: t.otype, entry: t.fill ?? t.entry, sl: t.sl, sl_init: t.sl_init,
+      tp: t.tp, tp_init: t.tp_init, risk_pct: t.risk_pct, opened: t.fill_t ? iso(t.fill_t) : null, expires: t.status === 'pending' ? iso(t.expiry_t) : null,
+      float_r: t.status === 'open' ? r2((t.side > 0 ? last.c - t.fill : t.fill - (last.c + spread)) / (Math.abs(t.fill - t.sl_init) || 1)) : null,
+      best_r_so_far: t.status === 'open' ? rr(t, t.mfe) : null, worst_r_so_far: t.status === 'open' ? rr(t, t.mae) : null })),
+    recent_results: recent.map(t => ({ id: t.id, side: t.side > 0 ? 'buy' : 'sell', opened: iso(t.fill_t), r: t.r, exit: t.exit_reason, best_r: rr(t, t.mfe), risk_pct: t.risk_pct })),
+    lessons,
+    review_these_closed_trades: toReview.map(t => ({ id: t.id, side: t.side > 0 ? 'buy' : 'sell', entry: t.fill, sl_init: t.sl_init, sl_final: t.sl, tp_init: t.tp_init,
+      tp_final: t.tp, exit: t.exit, exit_reason: t.exit_reason, r: t.r, risk_pct: t.risk_pct, best_r_during_trade: rr(t, t.mfe), worst_r_during_trade: rr(t, t.mae),
+      opened: iso(t.fill_t), closed: iso(t.exit_t), hours: r2((t.exit_t - t.fill_t) / 3600e3) })),
   };
 }
-const SYSTEM = `You are AI-GOLD, a disciplined discretionary trader of XAUUSD (gold), deciding once per closed H1 bar. This is a PAPER forward test
-(no real money) that the owner watches on a web page, so explain your reasoning briefly in Thai.
-Prices are broker bid prices, server time. Hard rules are enforced by code; a plan that breaks them is rejected:
-- at most ONE trade (pending or open) at a time; every new trade MUST have a stop loss and take profit
-- stop distance between ${RULES.minRiskAtr} and ${RULES.maxRiskAtr} x H1 ATR; take profit at least ${RULES.minRR} x the stop distance
-- pending orders expire after at most ${RULES.maxExpiryH} hours; buy_stop above price, sell_stop below, buy_limit below, sell_limit above
-- move_sl may only tighten the stop of the open trade; no averaging, no adding to a position
-You may (and often should) choose "wait". Prefer clear structure (trend, swing levels, ranges, breakouts/retests) over prediction.
-Use the lessons list: they are notes you wrote after earlier trades. If a trade just closed, write one short lesson (Thai) about it.
-Always reply by calling the submit_plan tool exactly once; never answer in plain text.`;
+const SYSTEM = `You are AI-GOLD (the owner calls this system "Mark2"), a discretionary trader of XAUUSD (gold), deciding once per closed H1 bar.
+This is a PAPER forward test (no real money) on a virtual $${RULES.startEquity} account that the owner watches on a web page; write all text in Thai.
+GOAL: grow the account as much as possible while keeping drawdown from the peak below 20-25%. You are judged on profit vs drawdown and against a
+random-direction twin that copies your sizes and initial stops/targets — so only trade when you see a real edge, and manage trades well.
+You have wide freedom. The ONLY rules (enforced by code; an item that breaks them is rejected, the rest of the plan still runs):
+- every trade must have a stop loss AND a take profit; you may move both at any time in either direction (but not past the current price)
+- choose risk per trade ${RULES.riskMin}-${RULES.riskMax}% of equity (use less when unsure); code halves it when DD >= ${RULES.ddHalf}% and blocks new trades at DD >= ${RULES.ddStop}%
+- total risk of all your open + pending trades (to their current stops) <= ${RULES.openRiskCap}% of equity; at most ${RULES.maxLive} trades at once, ${RULES.maxNewPerBar} new per bar
+- order types: market, stop (buy above / sell below price), limit (buy below / sell above price); pending orders expire within ${RULES.maxExpiryH} h
+Manage profits actively: move the stop to protect open profit and adjust targets so winners do not turn into losers or close for a tiny gain;
+best_r_so_far / worst_r_so_far show how far each open trade has run. Several trades, both directions, scaling in or out are allowed if you think they help.
+Use the lessons list (notes you wrote after earlier trades). For EVERY trade in review_these_closed_trades write a detailed review: why it won or lost,
+whether it could have made more (compare best_r_during_trade with r) or lost less, what you would do differently, and a one-line lesson.
+Empty orders/modify/close/cancel = wait. Always reply by calling the submit_plan tool exactly once; never answer in plain text.`;
 const TOOL = {
   name: 'submit_plan', description: 'Submit the plan for this H1 bar.',
-  input_schema: { type: 'object', required: ['bias', 'market_view', 'levels', 'action', 'reasoning'], properties: {
+  input_schema: { type: 'object', required: ['bias', 'market_view', 'levels', 'reasoning', 'orders', 'modify', 'close', 'cancel'], properties: {
     bias: { type: 'string', enum: ['up', 'down', 'neutral'] },
     market_view: { type: 'string', description: 'Thai, 1-2 sentences: what the market is doing' },
-    levels: { type: 'array', maxItems: 6, items: { type: 'object', required: ['price', 'kind'], properties: {
+    levels: { type: 'array', maxItems: 8, items: { type: 'object', required: ['price', 'kind'], properties: {
       price: { type: 'number' }, kind: { type: 'string', enum: ['support', 'resistance', 'pivot'] }, note: { type: 'string' } } } },
-    action: { type: 'string', enum: ['wait', 'buy_stop', 'sell_stop', 'buy_limit', 'sell_limit', 'buy_market', 'sell_market', 'move_sl', 'close', 'cancel_pending'] },
-    entry: { type: 'number' }, sl: { type: 'number' }, tp: { type: 'number' }, expiry_hours: { type: 'number' },
+    orders: { type: 'array', maxItems: RULES.maxNewPerBar, description: 'new trades (empty = none)', items: { type: 'object', required: ['side', 'type', 'sl', 'tp', 'risk_pct', 'why'], properties: {
+      side: { type: 'string', enum: ['buy', 'sell'] }, type: { type: 'string', enum: ['market', 'stop', 'limit'] }, entry: { type: 'number', description: 'required for stop/limit' },
+      sl: { type: 'number' }, tp: { type: 'number' }, risk_pct: { type: 'number', description: `${RULES.riskMin}-${RULES.riskMax}` },
+      expiry_hours: { type: 'number' }, why: { type: 'string', description: 'Thai' } } } },
+    modify: { type: 'array', description: 'move SL and/or TP of your open or pending trades', items: { type: 'object', required: ['id', 'why'], properties: {
+      id: { type: 'integer' }, sl: { type: 'number' }, tp: { type: 'number' }, why: { type: 'string', description: 'Thai' } } } },
+    close: { type: 'array', description: 'close open trades at market', items: { type: 'object', required: ['id', 'why'], properties: { id: { type: 'integer' }, why: { type: 'string' } } } },
+    cancel: { type: 'array', description: 'cancel pending orders', items: { type: 'object', required: ['id', 'why'], properties: { id: { type: 'integer' }, why: { type: 'string' } } } },
     confidence: { type: 'integer', minimum: 0, maximum: 100 },
-    reasoning: { type: 'string', description: 'Thai, 2-4 sentences' },
-    lesson: { type: 'string', description: 'Thai, one sentence, only when just_closed is not null' } } },
+    reasoning: { type: 'string', description: 'Thai, 2-5 sentences' },
+    reviews: { type: 'array', description: 'one per trade in review_these_closed_trades', items: { type: 'object', required: ['id', 'review', 'lesson'], properties: {
+      id: { type: 'integer' }, review: { type: 'string', description: 'Thai, detailed: why won/lost, could it have made more or lost less, what to do differently' },
+      lesson: { type: 'string', description: 'Thai, one line' } } } } } },
 };
 // This model does not accept a forced tool_choice, so tool_choice is 'auto' and the prompt requires the tool call;
 // if the reply has no tool call, ask once more in the same conversation.
@@ -192,9 +240,9 @@ async function askClaude(env, ctxObj) {
   const messages = [{ role: 'user', content: 'Market context (JSON):\n' + JSON.stringify(ctxObj) + '\n\nAnswer ONLY by calling submit_plan exactly once.' }];
   const usage = { input_tokens: 0, output_tokens: 0 };
   for (let attempt = 0; attempt < 2; attempt++) {
-    const r = await fetch('https://api.anthropic.com/v1/messages', {
+    const r = await fetch((env.ANTHROPIC_BASE || 'https://api.anthropic.com') + '/v1/messages', {   // ANTHROPIC_BASE only for local tests
       method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: MODEL, max_tokens: 4000, system: SYSTEM, tools: [TOOL], tool_choice: { type: 'auto' }, messages }),
+      body: JSON.stringify({ model: MODEL, max_tokens: 6000, system: SYSTEM, tools: [TOOL], tool_choice: { type: 'auto' }, messages }),
     });
     const d = await r.json();
     if (!r.ok) throw new Error(`Claude API ${r.status}: ${JSON.stringify(d).slice(0, 300)}`);
@@ -202,46 +250,52 @@ async function askClaude(env, ctxObj) {
     const tu = (d.content || []).find(x => x.type === 'tool_use');
     if (tu) return { plan: tu.input, usage };
     messages.push({ role: 'assistant', content: d.content && d.content.length ? d.content : [{ type: 'text', text: '(no answer)' }] });
-    messages.push({ role: 'user', content: 'Call submit_plan now with your plan (action "wait" is fine).' });
+    messages.push({ role: 'user', content: 'Call submit_plan now with your plan (empty arrays = wait).' });
   }
   throw new Error('no plan in reply');
 }
 
-// ---------------- hard rules ----------------
-function validate(p, price, spread, atrH1, live) {
-  const a = p.action; const open = live.find(t => t.status === 'open'), pend = live.find(t => t.status === 'pending');
-  if (a === 'wait') return { ok: true };
-  if (a === 'close') return open ? { ok: true } : { ok: false, why: 'ไม่มีไม้เปิดให้ปิด' };
-  if (a === 'cancel_pending') return pend ? { ok: true } : { ok: false, why: 'ไม่มีออเดอร์รอ' };
-  if (a === 'move_sl') {
-    if (!open) return { ok: false, why: 'ไม่มีไม้เปิด' };
-    if (!(p.sl > 0) || open.side * (p.sl - open.sl) <= 0) return { ok: false, why: 'ขยับ SL ได้เฉพาะทางที่แคบลง' };
-    if (open.side > 0 ? p.sl >= price : p.sl <= price + spread) return { ok: false, why: 'SL ใหม่เลยราคาปัจจุบัน' };
-    return { ok: true };
-  }
-  if (live.length >= RULES.maxOpen) return { ok: false, why: 'มีไม้/ออเดอร์อยู่แล้ว (สูงสุด 1)' };
-  const side = a.startsWith('buy') ? 1 : -1, type = a.split('_')[1];
-  const entry = type === 'market' ? (side > 0 ? price + spread : price) : +p.entry;
-  if (!(entry > 0) || !(p.sl > 0) || !(p.tp > 0)) return { ok: false, why: 'ไม่มี entry/SL/TP' };
-  const dSL = side * (entry - p.sl), dTP = side * (p.tp - entry);
-  if (dSL <= 0 || dTP <= 0) return { ok: false, why: 'SL/TP อยู่ผิดฝั่ง' };
-  if (dSL < RULES.minRiskAtr * atrH1 || dSL > RULES.maxRiskAtr * atrH1) return { ok: false, why: `ระยะ SL ${r2(dSL)} นอกช่วง ${RULES.minRiskAtr}-${RULES.maxRiskAtr} ATR (${r2(atrH1)})` };
-  if (dTP < RULES.minRR * dSL) return { ok: false, why: 'TP น้อยกว่า 1R' };
+// ---------------- hard rules v2 ----------------
+const arr = x => Array.isArray(x) ? x : [];
+function checkNew(o, price, spread) {
+  const side = o.side === 'buy' ? 1 : o.side === 'sell' ? -1 : 0, type = ['market', 'stop', 'limit'].includes(o.type) ? o.type : null;
+  if (!side || !type) return { ok: false, why: 'side/type ไม่ถูกต้อง' };
+  const entry = type === 'market' ? (side > 0 ? price + spread : price) : +o.entry;
+  if (!(entry > 0) || !(+o.sl > 0) || !(+o.tp > 0)) return { ok: false, why: 'ไม่มี entry/SL/TP' };
+  if (side * (entry - o.sl) <= 0 || side * (o.tp - entry) <= 0) return { ok: false, why: 'SL/TP อยู่ผิดฝั่ง' };
+  if (side * (entry - o.sl) < spread) return { ok: false, why: 'SL ใกล้กว่าสเปรด' };
   if (type === 'stop' && (side > 0 ? entry <= price + spread : entry >= price)) return { ok: false, why: 'stop order อยู่ผิดฝั่งของราคา' };
   if (type === 'limit' && (side > 0 ? entry >= price + spread : entry <= price)) return { ok: false, why: 'limit order อยู่ผิดฝั่งของราคา' };
-  return { ok: true, side, type, entry };
+  const rp = +o.risk_pct;
+  if (!(rp >= RULES.riskMin && rp <= RULES.riskMax)) return { ok: false, why: `risk ${o.risk_pct}% นอกช่วง ${RULES.riskMin}-${RULES.riskMax}%` };
+  return { ok: true, side, type, entry, rp };
+}
+function checkModify(m, t, price, spread) {
+  if (!t) return { ok: false, why: `ไม่พบไม้ #${m.id}` };
+  const sl = m.sl != null ? +m.sl : t.sl, tp = m.tp != null ? +m.tp : t.tp, s = t.side;
+  if (!(sl > 0) || !(tp > 0)) return { ok: false, why: 'SL/TP ต้องมีเสมอ' };
+  if (t.status === 'open') {
+    if (s > 0 ? sl >= price : sl <= price + spread) return { ok: false, why: 'SL ใหม่เลยราคาปัจจุบัน' };
+    if (s > 0 ? tp <= price : tp >= price + spread) return { ok: false, why: 'TP ใหม่เลยราคาปัจจุบัน (ใช้ close แทน)' };
+  } else if (s * (t.entry - sl) <= 0 || s * (tp - t.entry) <= 0) return { ok: false, why: 'SL/TP ผิดฝั่งของราคาเข้า' };
+  return { ok: true, sl, tp };
 }
 
 async function decide(env, h1, m15, spread) {
   if (!env.ANTHROPIC_API_KEY) { await event(env, 'WARN', 'ยังไม่ได้ใส่ ANTHROPIC_API_KEY', 'ai', 'err'); return; }
   if ((await kvGet(env, 'paused', '0')) === '1') return;
-  const live = (await env.DB.prepare("SELECT * FROM trades WHERE kind='ai' AND status IN ('pending','open')").all()).results;
-  const recent = (await env.DB.prepare("SELECT * FROM trades WHERE kind='ai' AND status='closed' ORDER BY exit_t DESC LIMIT 8").all()).results;
+  const live = (await env.DB.prepare("SELECT * FROM trades WHERE kind='ai' AND status IN ('pending','open') ORDER BY id").all()).results;
+  const closedAsc = (await env.DB.prepare("SELECT * FROM trades WHERE kind='ai' AND status='closed' AND r IS NOT NULL ORDER BY exit_t, id").all()).results;
+  const recent = closedAsc.slice(-8).reverse();
   const L = (await getDoc(env, 'state', 'lessons')) || { items: [] };
-  const needLesson = (await env.DB.prepare("SELECT * FROM trades WHERE kind='ai' AND status='closed' AND lesson IS NULL ORDER BY exit_t DESC LIMIT 1").first());
+  const toReview = closedAsc.filter(t => t.lesson == null).slice(-3);
   const A = atr(h1), atrH1 = A[A.length - 1], price = m15[m15.length - 1].c;
-  const cx = context(h1, m15, spread, live, recent, L.items.slice(-15), needLesson ? { id: needLesson.id, side: needLesson.side > 0 ? 'buy' : 'sell',
-    entry: needLesson.fill, sl_init: needLesson.sl_init, tp: needLesson.tp, exit: needLesson.exit, r: needLesson.r, why: needLesson.exit_reason, opened: iso(needLesson.fill_t), closed: iso(needLesson.exit_t) } : null);
+  let acct = account(closedAsc, live, price, spread);
+  if (acct.mode === 'stopped' && (await kvGet(env, 'dd_stop', '0')) !== '1') {
+    await kvSet(env, 'dd_stop', '1'); await event(env, 'WARN', `DD ${acct.dd_pct}% ถึงเกณฑ์ ${RULES.ddStop}% -> หยุดเปิดไม้ใหม่ รอคนตรวจ`, 'boss', 'stop');
+  }
+  const ddStopped = (await kvGet(env, 'dd_stop', '0')) === '1';
+  const cx = context(h1, m15, spread, live, recent, L.items.slice(-15), toReview, { ...acct, mode: ddStopped ? 'stopped' : acct.mode });
   let plan, usage;
   const barH1 = h1[h1.length - 1].t;
   try { ({ plan, usage } = await askClaude(env, cx)); } catch (e) {
@@ -250,37 +304,63 @@ async function decide(env, h1, m15, spread) {
     await setDoc(env, 'state', 'retry', { bar: barH1, tries: rt.bar === barH1 ? (rt.tries || 0) + 1 : 1 });
     await event(env, 'ERROR', e.message, 'ai', 'err'); return;
   }
-  const v = validate(plan, price, spread, atrH1, live);
-  const d = await env.DB.prepare('INSERT INTO decisions(time,bar_t,model,tokens_in,tokens_out,plan,valid,note) VALUES(?,?,?,?,?,?,?,?)')
-    .bind(nowIso(), h1[h1.length - 1].t, MODEL, usage.input_tokens || 0, usage.output_tokens || 0, JSON.stringify({ ...plan, price, atr: r2(atrH1) }), v.ok ? 1 : 0, v.ok ? null : v.why).run();
-  const did = d.meta.last_row_id;
-  if (needLesson && plan.lesson) {
-    await env.DB.prepare('UPDATE trades SET lesson=? WHERE id=?').bind(String(plan.lesson).slice(0, 300), needLesson.id).run();
-    L.items.push({ t: nowIso(), r: needLesson.r, text: String(plan.lesson).slice(0, 300) }); L.items = L.items.slice(-40); await setDoc(env, 'state', 'lessons', L);
-  }
-  if (!v.ok) { await event(env, 'INFO', `แผน ${plan.action} ถูกปัดตก: ${v.why}`, 'ai', 'reject'); return; }
-  if (plan.action === 'wait') { await event(env, 'INFO', `รอ · ${plan.market_view || ''}`.slice(0, 160), 'ai', 'plan'); return; }
   const barT = m15[m15.length - 1].t + 15 * 60e3;   // orders act from the next M15 bar
-  if (plan.action === 'close') { const t = live.find(x => x.status === 'open'); close(t, t.side > 0 ? price : price + spread, barT, 'ai_close'); await saveTrade(env, t); await tradeEvent(env, t, 'close'); return; }
-  if (plan.action === 'cancel_pending') { const t = live.find(x => x.status === 'pending'); t.status = 'cancelled'; t.exit_reason = 'ai_cancel'; t.exit_t = barT; await saveTrade(env, t); await tradeEvent(env, t, 'cancel'); return; }
-  if (plan.action === 'move_sl') { const t = live.find(x => x.status === 'open'); const old = t.sl; t.sl = +plan.sl; await saveTrade(env, t);
-    await event(env, 'INFO', `ขยับ SL ${SIDE(t.side)} จาก ${px(old)} เป็น ${px(t.sl)}`, 'ai', 'sl'); return; }
-  const expH = Math.min(Math.max(+plan.expiry_hours || 4, 1), RULES.maxExpiryH);
-  const streak = (await env.DB.prepare("SELECT r FROM trades WHERE kind='ai' AND status='closed' ORDER BY exit_t DESC LIMIT ?").bind(RULES.maxLossStreakPause).all()).results;
-  if (streak.length >= RULES.maxLossStreakPause && streak.every(x => x.r <= 0)) { await kvSet(env, 'paused', '1'); await event(env, 'WARN', `แพ้ติดกัน ${RULES.maxLossStreakPause} ไม้ -> หยุดเปิดไม้ใหม่ รอคนตรวจ`, 'boss', 'stop'); return; }
-  const tr = { kind: 'ai', status: v.type === 'market' ? 'open' : 'pending', side: v.side, otype: v.type, created_t: barT, expiry_t: barT + expH * 3600e3,
-    entry: v.entry, sl: +plan.sl, sl_init: +plan.sl, tp: +plan.tp, decision_id: did };
-  if (v.type === 'market') { tr.fill = v.entry; tr.fill_t = barT; }
-  await insertTrade(env, tr);
-  if (v.type === 'market') await tradeEvent(env, tr, 'fill');
-  else await event(env, 'INFO', `ตั้ง ${SIDE(tr.side)} ${tr.otype.toUpperCase()} @ ${px(tr.entry)} · SL ${px(tr.sl)} · TP ${px(tr.tp)} · หมดอายุ ${expH} ชม.`, 'ai', 'order');
-  if (v.type === 'market') {   // twin for market entries is created here (pending ones get theirs when filled)
-    const side = crypto.getRandomValues(new Uint8Array(1))[0] & 1 ? 1 : -1, dSL = Math.abs(tr.entry - tr.sl), dTP = Math.abs(tr.tp - tr.entry);
-    const fill = side > 0 ? price + spread : price;
-    const tw = await insertTrade(env, { kind: 'rand', status: 'open', side, otype: 'market', created_t: barT, expiry_t: barT, entry: fill, sl: fill - side * dSL, sl_init: fill - side * dSL,
-      tp: fill + side * dTP, fill_t: barT, fill, decision_id: did, twin_of: tr.id });
-    await tradeEvent(env, tw, 'fill');
+  const rejects = [], done = [];
+  const byId = id => live.find(t => t.id === +id && (t.status === 'open' || t.status === 'pending'));
+  // reviews of closed trades -> trades.lesson (one line) + trades.review (detailed) + lessons memory
+  for (const rv of arr(plan.reviews)) {
+    const t = toReview.find(x => x.id === +rv.id); if (!t) continue;
+    await env.DB.prepare('UPDATE trades SET lesson=?, review=? WHERE id=?').bind(String(rv.lesson || '').slice(0, 300), String(rv.review || '').slice(0, 2000), t.id).run();
+    L.items.push({ t: nowIso(), id: t.id, r: t.r, text: String(rv.lesson || '').slice(0, 300) }); L.items = L.items.slice(-40);
+    await event(env, 'INFO', `ทบทวนไม้ #${t.id} (${t.r >= 0 ? '+' : ''}${t.r}R): ${String(rv.review || '').slice(0, 220)}`, 'ai', 'rep');
   }
+  if (arr(plan.reviews).length) await setDoc(env, 'state', 'lessons', L);
+  // closes
+  for (const c of arr(plan.close)) {
+    const t = byId(c.id); if (!t || t.status !== 'open') { rejects.push(`ปิด #${c.id}: ไม่พบไม้เปิด`); continue; }
+    close(t, t.side > 0 ? price : price + spread, barT, 'ai_close'); await saveTrade(env, t); await tradeEvent(env, t, 'close'); done.push(`ปิด #${t.id}`);
+  }
+  for (const c of arr(plan.cancel)) {
+    const t = byId(c.id); if (!t || t.status !== 'pending') { rejects.push(`ยกเลิก #${c.id}: ไม่พบออเดอร์รอ`); continue; }
+    t.status = 'cancelled'; t.exit_reason = 'ai_cancel'; t.exit_t = barT; await saveTrade(env, t); await tradeEvent(env, t, 'cancel'); done.push(`ยกเลิก #${t.id}`);
+  }
+  for (const m of arr(plan.modify)) {
+    const t = byId(m.id), v = checkModify(m, t, price, spread);
+    if (!v.ok) { rejects.push(`แก้ #${m.id}: ${v.why}`); continue; }
+    const os = t.sl, ot = t.tp; t.sl = v.sl; t.tp = v.tp; await saveTrade(env, t);
+    const parts = []; if (os !== t.sl) parts.push(`SL ${px(os)}→${px(t.sl)}`); if (ot !== t.tp) parts.push(`TP ${px(ot)}→${px(t.tp)}`);
+    if (parts.length) { await event(env, 'INFO', `ปรับ ${SIDE(t.side)} #${t.id}: ${parts.join(' · ')}${m.why ? ' — ' + String(m.why).slice(0, 100) : ''}`, 'ai', 'sl'); done.push(`แก้ #${t.id}`); }
+  }
+  // new orders (after closes/modifies, so freed risk can be reused)
+  const liveNow = live.filter(t => t.status === 'open' || t.status === 'pending');
+  for (const o of arr(plan.orders).slice(0, RULES.maxNewPerBar)) {
+    if (ddStopped) { rejects.push(`เปิดใหม่: DD ถึง ${RULES.ddStop}% หยุดเปิดไม้`); continue; }
+    const v = checkNew(o, price, spread); if (!v.ok) { rejects.push(`เปิด ${o.side} ${o.type}: ${v.why}`); continue; }
+    if (liveNow.length >= RULES.maxLive) { rejects.push(`เปิดใหม่: ครบ ${RULES.maxLive} ไม้แล้ว`); continue; }
+    const rp = r2(acct.mode === 'half' ? v.rp / 2 : v.rp);
+    const used = account([], liveNow, price, spread).open_risk_pct;
+    if (used + rp > RULES.openRiskCap + 1e-9) { rejects.push(`เปิดใหม่: ความเสี่ยงรวม ${r2(used)}%+${rp}% เกิน ${RULES.openRiskCap}%`); continue; }
+    const expH = Math.min(Math.max(+o.expiry_hours || 8, 1), RULES.maxExpiryH);
+    const tr = { kind: 'ai', status: v.type === 'market' ? 'open' : 'pending', side: v.side, otype: v.type, created_t: barT, expiry_t: barT + expH * 3600e3,
+      entry: v.entry, sl: +o.sl, sl_init: +o.sl, tp: +o.tp, risk_pct: rp, decision_id: null };
+    if (v.type === 'market') { tr.fill = v.entry; tr.fill_t = barT; }
+    await insertTrade(env, tr); liveNow.push(tr); tr._why = o.why;
+    if (v.type === 'market') {
+      await tradeEvent(env, tr, 'fill');
+      const side = crypto.getRandomValues(new Uint8Array(1))[0] & 1 ? 1 : -1, dSL = Math.abs(tr.entry - tr.sl), dTP = Math.abs(tr.tp - tr.entry), fill = side > 0 ? price + spread : price;
+      const tw = await insertTrade(env, { kind: 'rand', status: 'open', side, otype: 'market', created_t: barT, expiry_t: barT, entry: fill, sl: fill - side * dSL, sl_init: fill - side * dSL,
+        tp: fill + side * dTP, fill_t: barT, fill, decision_id: null, twin_of: tr.id, risk_pct: rp });
+      await tradeEvent(env, tw, 'fill');
+    } else await event(env, 'INFO', `ตั้ง ${SIDE(tr.side)} ${tr.otype.toUpperCase()} @ ${px(tr.entry)} · SL ${px(tr.sl)} · TP ${px(tr.tp)} · เสี่ยง ${rp}% · หมดอายุ ${expH} ชม.`, 'ai', 'order');
+    done.push(`${o.side} ${o.type} ${rp}%`);
+  }
+  const d = await env.DB.prepare('INSERT INTO decisions(time,bar_t,model,tokens_in,tokens_out,plan,valid,note) VALUES(?,?,?,?,?,?,?,?)')
+    .bind(nowIso(), barH1, MODEL, usage.input_tokens || 0, usage.output_tokens || 0, JSON.stringify({ ...plan, price, atr: r2(atrH1), account: acct, done }),
+      rejects.length ? 0 : 1, rejects.length ? rejects.join(' | ').slice(0, 1000) : null).run();
+  const did = d.meta.last_row_id;
+  await env.DB.prepare("UPDATE trades SET decision_id=? WHERE decision_id IS NULL AND created_t=? AND status IN ('open','pending')").bind(did, barT).run();
+  for (const rj of rejects) await event(env, 'INFO', 'ปัดตก: ' + rj, 'ai', 'reject');
+  if (!done.length && !rejects.length) await event(env, 'INFO', `รอ · ${plan.market_view || ''}`.slice(0, 160), 'ai', 'plan');
 }
 
 async function eaBars(req, env, ctx) {
@@ -354,7 +434,7 @@ async function office(env) {
   const trades = (await env.DB.prepare('SELECT * FROM trades ORDER BY id').all()).results;
   const ev = (await env.DB.prepare('SELECT id,time,level,msg,agent,kind FROM events ORDER BY id DESC LIMIT 40').all()).results;
   const feed = await getDoc(env, 'state', 'feed'), ping = await getDoc(env, 'state', 'ping'), dept = (await getDoc(env, 'state', 'dept')) || { roles: {} };
-  const paused = (await kvGet(env, 'paused', '0')) === '1';
+  const paused = (await kvGet(env, 'paused', '0')) === '1' || (await kvGet(env, 'dd_stop', '0')) === '1';
   const lastDec = await env.DB.prepare('SELECT id,time,plan,valid FROM decisions ORDER BY id DESC LIMIT 1').first();
   const nM15 = (await env.DB.prepare("SELECT COUNT(*) n FROM bars WHERE tf='M15'").first()).n;
   const pingFresh = ping && now - ping.at < 5 * 60e3;
@@ -371,19 +451,23 @@ async function office(env) {
     let eq = 10000, peak = 10000, cum = 0, cumPeak = 0, ddR = 0, eqDay = null, streak = 0;
     for (const t of cl) {
       if (eqDay === null && bkkDay(t.exit_t) >= today) eqDay = eq;
-      eq *= 1 + 0.01 * t.r; peak = Math.max(peak, eq); cum += t.r; cumPeak = Math.max(cumPeak, cum); ddR = Math.min(ddR, cum - cumPeak);
+      eq *= 1 + (t.risk_pct ?? 1) / 100 * t.r; peak = Math.max(peak, eq); cum += t.r; cumPeak = Math.max(cumPeak, cum); ddR = Math.min(ddR, cum - cumPeak);
     }
     for (let i = cl.length - 1; i >= 0 && cl[i].r <= 0; i--) streak++;
-    const open = trades.find(t => t.kind === kind && t.status === 'open'), pend = trades.find(t => t.kind === kind && t.status === 'pending');
+    const opens = trades.filter(t => t.kind === kind && t.status === 'open'), pends = trades.filter(t => t.kind === kind && t.status === 'pending');
+    const open = opens[opens.length - 1], pend = pends[pends.length - 1];
     const fR = open ? floatR(open) : null;
-    const eqNow = eq * (1 + 0.01 * (fR || 0));
+    const floatPct = opens.reduce((a, t) => a + (t.risk_pct ?? 1) * (floatR(t) || 0), 0);
+    const eqNow = eq * (1 + floatPct / 100);
     if (eqDay === null) eqDay = eq;
     return { n: cl.length, sum_r: r2(cum), dd_r: r2(Math.min(ddR, cum + (fR || 0) - cumPeak)), streak, eq_closed: r2(eq), eq: r2(eqNow), peak: r2(Math.max(peak, eqNow)),
       dd_pct: r2((Math.max(peak, eqNow) - eqNow) / Math.max(peak, eqNow) * 100), today_usd: r2(eqNow - eqDay), today_pct: r2((eqNow - eqDay) / eqDay * 100),
       today_r: r2(cl.filter(t => bkkDay(t.exit_t) === today).reduce((a, t) => a + t.r, 0)),
       win: cl.length ? Math.round(cl.filter(t => t.r > 0).length / cl.length * 100) : null,
-      open: open ? { side: SIDE(open.side), entry: open.fill, sl: open.sl, sl_init: open.sl_init, tp: open.tp, float_r: fR === null ? null : r2(fR),
-        float_usd: fR === null ? null : r2(fR * 0.01 * eq), float_oz: bid ? r2(open.side > 0 ? bid - open.fill : open.fill - (bid + spread)) : null, since: open.fill_t } : null,
+      n_open: opens.length, n_pend: pends.length,
+      open: open ? { id: open.id, side: SIDE(open.side), entry: open.fill, sl: open.sl, sl_init: open.sl_init, tp: open.tp, risk_pct: open.risk_pct, float_r: fR === null ? null : r2(fR),
+        float_usd: fR === null ? null : r2(fR * (open.risk_pct ?? 1) / 100 * eq), float_oz: bid ? r2(open.side > 0 ? bid - open.fill : open.fill - (bid + spread)) : null, since: open.fill_t,
+        more: opens.length - 1 } : null,
       pending: pend ? { side: SIDE(pend.side), type: pend.otype, entry: pend.entry, sl: pend.sl, tp: pend.tp, expires: pend.expiry_t } : null };
   }
   const ai = book('ai'), rnd = book('rand');
@@ -399,7 +483,7 @@ async function office(env) {
     st: aiErr ? 'error' : paused ? 'stop' : ai.open ? 'hold' : 'wait',
     label: aiErr ? 'error' : paused ? 'หยุด' : ai.open ? 'ถือไม้' : ai.pending ? 'ตั้งออเดอร์รอ' : 'รอสัญญาณ',
     pos: ai.open, pending: ai.pending,
-    note: aiErr ? 'เรียก Claude ไม่สำเร็จ: ' + lastAiErr.msg.slice(0, 120) : paused ? 'หยุดเปิดไม้ใหม่ (กฎแพ้ติดกัน/กดหยุด) รอคนตรวจ'
+    note: aiErr ? 'เรียก Claude ไม่สำเร็จ: ' + lastAiErr.msg.slice(0, 120) : paused ? 'หยุดเปิดไม้ใหม่ (DD ถึง 30% หรือกดหยุด) รอคนตรวจ'
       : lp ? `แผนล่าสุด: ${lp.action} · ${lp.market_view || ''}`.slice(0, 160) : 'ยังไม่มีแผน รอแท่ง H1 ถัดไป',
     stats: [['รวม R', (ai.sum_r >= 0 ? '+' : '') + ai.sum_r + 'R', ai.sum_r > 0 ? 'up' : ai.sum_r < 0 ? 'down' : ''], ['DD ระบบ', ai.dd_r + 'R', ''], ['ไม้ปิด', ai.n + (ai.win !== null ? ` · ชนะ ${ai.win}%` : ''), '']],
     last: lastEv('ai') });
@@ -429,9 +513,9 @@ async function office(env) {
   const evToday = ev.filter(e => bkkDay(tsOf(e.time)) === today).length;
   return {
     now, market_open: mOpen,
-    kpi: { equity: ai.eq, today_usd: ai.today_usd, today_pct: ai.today_pct, today_r: ai.today_r, dd_pct: ai.dd_pct, dd_limit: 15, peak: ai.peak,
-      streak: ai.streak, streak_limit: RULES.maxLossStreakPause, paused,
-      open: { ai: (ai.open ? 1 : 0), ai_pending: ai.pending ? 1 : 0, rand: rnd.open ? 1 : 0 } },
+    kpi: { equity: ai.eq, today_usd: ai.today_usd, today_pct: ai.today_pct, today_r: ai.today_r, dd_pct: ai.dd_pct, dd_limit: RULES.ddHalf, dd_stop: RULES.ddStop, peak: ai.peak,
+      streak: ai.streak, paused,
+      open: { ai: ai.n_open, ai_pending: ai.n_pend, rand: rnd.n_open } },
     hb: { mt5: ping ? ping.conn_at : null, vps: ping ? ping.at : null, feed: feed ? tsOf(feed.at) : null, ver: ping ? ping.ver : null, price_at: priceAt },
     agents, events: ev.map(e => ({ id: e.id, t: tsOf(e.time), agent: e.agent || 'sys', kind: e.kind || (e.level === 'ERROR' ? 'err' : 'info'), msg: e.msg })), events_today: evToday };
 }
@@ -466,7 +550,7 @@ export default {
         if (!(await session(req, env))) return json({ error: 'login required' }, 401);
         if (p === '/api/view') return json(await view(env));
         if (p === '/api/office') return json(await office(env));
-        if (p === '/api/pause' && req.method === 'POST') { const { paused } = await req.json(); await kvSet(env, 'paused', paused ? '1' : '0'); await event(env, 'WARN', paused ? 'หยุด AI (กดจากหน้าเว็บ)' : 'เปิด AI ต่อ (กดจากหน้าเว็บ)', 'boss', paused ? 'stop' : 'info'); return json({ ok: true }); }
+        if (p === '/api/pause' && req.method === 'POST') { const { paused } = await req.json(); await kvSet(env, 'paused', paused ? '1' : '0'); if (!paused) await kvSet(env, 'dd_stop', '0'); await event(env, 'WARN', paused ? 'หยุด AI (กดจากหน้าเว็บ)' : 'เปิด AI ต่อ (กดจากหน้าเว็บ)', 'boss', paused ? 'stop' : 'info'); return json({ ok: true }); }
         return json({ error: 'not found' }, 404);
       }
       return env.ASSETS.fetch(req);
