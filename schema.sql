@@ -9,6 +9,6 @@ CREATE TABLE IF NOT EXISTS decisions(id INTEGER PRIMARY KEY AUTOINCREMENT, time 
 CREATE TABLE IF NOT EXISTS trades(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, status TEXT, side INTEGER, otype TEXT,
   created TEXT, created_t INTEGER, expiry_t INTEGER, entry REAL, sl REAL, sl_init REAL, tp REAL,
   fill_t INTEGER, fill REAL, exit_t INTEGER, exit REAL, r REAL, exit_reason TEXT, decision_id INTEGER, twin_of INTEGER, lesson TEXT,
-  risk_pct REAL, tp_init REAL, mfe REAL, mae REAL, review TEXT);  -- rules v2 2026-10-30: risk %, initial TP, max favourable/adverse excursion, detailed AI review
+  risk_pct REAL, tp_init REAL, mfe REAL, mae REAL, review TEXT, why TEXT);  -- rules v2 2026-10-30: risk %, initial TP, max favourable/adverse excursion, detailed AI review
 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT, level TEXT, msg TEXT, agent TEXT, kind TEXT);  -- agent/kind added 2026-10-29 for the Agent Office
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);

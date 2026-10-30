@@ -21,6 +21,17 @@
   th { color:var(--mut); font-weight:500; } .scroll { max-height:420px; overflow:auto; }
   .plan { white-space:pre-wrap; } .tag { font-size:11px; padding:1px 6px; border-radius:4px; background:var(--line); }
   button { background:var(--line); color:var(--tx); border:1px solid #333a46; border-radius:6px; padding:6px 12px; cursor:pointer; }
+  .tcards { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:10px; }
+  .tc { background:#12151b; border:1px solid var(--line); border-left:4px solid var(--mut); border-radius:8px; padding:10px; display:flex; flex-direction:column; gap:6px; min-width:0; }
+  .tc.win { border-left-color:var(--up); } .tc.loss { border-left-color:var(--dn); } .tc.open { border-left-color:#7dcfff; } .tc.pend { border-left-style:dashed; border-left-color:#7dcfff; }
+  .tc .hd { display:flex; justify-content:space-between; align-items:baseline; gap:8px; } .tc .hd b { font-size:15px; }
+  .tc .big { font-size:20px; font-weight:700; } .tc .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:2px 10px; font-size:12px; }
+  .tc .grid2 span { color:var(--mut); } .tc .grid2 b { font-weight:500; color:var(--tx); }
+  .tc .bar { position:relative; height:8px; background:#20242c; border-radius:4px; }
+  .tc .bar i { position:absolute; top:0; bottom:0; border-radius:4px; } .tc .bar u { position:absolute; top:-3px; bottom:-3px; width:2px; background:#fff; }
+  .tc .why, .tc .rv { font-size:12px; color:#c9ced8; overflow-wrap:anywhere; } .tc .rv { background:#0b0d11; border-radius:6px; padding:6px 8px; white-space:pre-wrap; }
+  .tc .tw { font-size:12px; border-top:1px dashed var(--line); padding-top:6px; } .tc ul { margin:0; padding-left:16px; font-size:12px; color:var(--mut); }
+  .filters button.on { background:var(--acc); color:#111; border-color:var(--acc); }
   #login { max-width:320px; margin:80px auto; } input { width:100%; padding:8px; border-radius:6px; border:1px solid var(--line); background:#0b0d11; color:var(--tx); margin:8px 0; }
 </style>
 </head>
@@ -45,6 +56,9 @@
       <div class="card kpi"><h2>เทียบ: ทิศสุ่ม SL/TP เดียวกัน</h2><div id="krand"></div></div>
       <div class="card kpi"><h2>เกณฑ์ผ่าน (ตั้งไว้ก่อนเริ่ม)</h2><div class="mut" style="font-size:12px">≥ 50 ไม้ · AI เฉลี่ย ≥ +0.10R · ดีกว่าทิศสุ่ม ≥ 0.15R · ไม่มีไม้ผิดกฎ</div><div id="kpass"></div></div>
     </div>
+    <div class="card" style="margin-top:12px"><h2 style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><span>การ์ดสรุปแต่ละไม้ (AI เทียบคู่สุ่ม)</span>
+      <span class="filters"><button data-f="all" class="on">ทั้งหมด</button> <button data-f="live">เปิดอยู่</button> <button data-f="closed">ปิดแล้ว</button></span></h2>
+      <div id="tcards" class="tcards"></div></div>
     <div class="card" style="margin-top:12px"><h2>ไม้ (paper)</h2><div class="scroll"><table id="tt"></table></div></div>
   </section>
   <aside>
@@ -92,12 +106,68 @@ function draw(d) {
 }
 function kpi(s) { if (!s.n) return '<span class="mut">ยังไม่มีไม้ปิด</span>';
   return `<b class="${s.avg_r > 0 ? 'up' : 'dn'}">${s.avg_r > 0 ? '+' : ''}${s.avg_r}R/ไม้</b>${s.n} ไม้ · ชนะ ${s.win}% · รวม ${s.sum_r}R · PF ${s.pf ?? '-'}`; }
+let cardFilter = 'all', lastD = null;
+document.addEventListener('click', e => { const b = e.target.closest('.filters button'); if (!b) return; cardFilter = b.dataset.f;
+  document.querySelectorAll('.filters button').forEach(x => x.classList.toggle('on', x === b)); if (lastD) renderCards(lastD); });
+const n2 = x => x == null ? '—' : (+x).toFixed(2), sg = x => (x > 0 ? '+' : '') + (+x).toFixed(2);
+const dur = ms => { if (!(ms > 0)) return '—'; const m = Math.round(ms / 60e3); return m < 60 ? m + ' นาที' : m < 1440 ? (m / 60).toFixed(1) + ' ชม.' : (m / 1440).toFixed(1) + ' วัน'; };
+const WHY = { tp: 'ถึง TP', sl: 'โดน SL', trail: 'โดน SL ที่เลื่อนแล้ว', ai_close: 'AI สั่งปิด', expired: 'ออเดอร์หมดเวลา', ai_cancel: 'AI ยกเลิกออเดอร์' };
+function renderCards(d) {
+  lastD = d;
+  const ai = d.trades.filter(t => t.kind === 'ai').sort((a, b) => b.id - a.id);
+  const twinOf = Object.fromEntries(d.trades.filter(t => t.kind === 'rand' && t.twin_of).map(t => [t.twin_of, t]));
+  // equity before each AI trade (virtual $10,000, compounding by risk % x R in exit order) -> $ per trade
+  const eqAt = {}; let eq = 10000;
+  d.trades.filter(t => t.kind === 'ai' && t.status === 'closed' && t.r != null).sort((a, b) => a.exit_t - b.exit_t || a.id - b.id)
+    .forEach(t => { eqAt[t.id] = eq; eq *= 1 + (t.risk_pct ?? 1) / 100 * t.r; });
+  const bid = d.live && d.live.bid, ask = d.live && d.live.ask ? d.live.ask : bid;
+  const rOf = t => { const risk = Math.abs((t.fill ?? t.entry) - t.sl_init) || 1;
+    if (t.status === 'closed') return t.r; if (t.status !== 'open' || !bid) return null; return (t.side > 0 ? bid - t.fill : t.fill - ask) / risk; };
+  const ex = t => { const risk = Math.abs((t.fill ?? t.entry) - t.sl_init) || 1; return { best: t.mfe != null ? t.mfe / risk : null, worst: t.mae != null ? -t.mae / risk : null }; };
+  const evFor = id => (d.tradeEvents || []).filter(e => e.agent === 'ai' && e.kind === 'sl' && new RegExp('#' + id + '\\b').test(e.msg)).reverse();
+  const list = ai.filter(t => cardFilter === 'all' || (cardFilter === 'live' ? (t.status === 'open' || t.status === 'pending') : (t.status === 'closed' || t.status === 'cancelled')));
+  if (!list.length) { $('tcards').innerHTML = '<span class="mut">ยังไม่มีไม้' + (cardFilter === 'all' ? '' : 'ในกลุ่มนี้') + '</span>'; return; }
+  $('tcards').innerHTML = list.map(t => {
+    const r = rOf(t), x = ex(t), tw = twinOf[t.id], twR = tw ? rOf(tw) : null;
+    const cls = t.status === 'pending' ? 'pend' : t.status === 'open' ? 'open' : t.status === 'cancelled' ? '' : r > 0 ? 'win' : 'loss';
+    const st = { pending: 'ออเดอร์รอ', open: 'เปิดอยู่', closed: 'ปิดแล้ว', cancelled: 'ยกเลิก' }[t.status];
+    const usd = r != null ? r * (t.risk_pct ?? 1) / 100 * (eqAt[t.id] ?? eq) : null;
+    // excursion bar: worst ... best, marker at current/final R, scale -1R .. max(best, 2R)
+    let bar = '';
+    if (t.fill != null && (x.best != null || x.worst != null)) {
+      const lo = Math.min(-1, x.worst ?? 0, r ?? 0), hi = Math.max(1, x.best ?? 0, r ?? 0), pos = v => ((v - lo) / (hi - lo) * 100).toFixed(1) + '%';
+      bar = `<div class="bar" title="แย่สุด ${n2(x.worst)}R · ดีสุด ${n2(x.best)}R"><i style="left:${pos(x.worst ?? 0)};right:calc(100% - ${pos(x.best ?? 0)});background:linear-gradient(90deg,#ef5350,#2a2f3a 50%,#26a69a)"></i><u style="left:${pos(0)};background:#555"></u>${r != null ? `<u style="left:${pos(r)}"></u>` : ''}</div>
+        <div class="mut" style="font-size:11px;display:flex;justify-content:space-between"><span>แย่สุด ${n2(x.worst)}R</span><span>${t.status === 'closed' ? 'ปิดที่' : 'ตอนนี้'} ${r != null ? sg(r) + 'R' : '—'}</span><span>ดีสุด ${n2(x.best)}R</span></div>`;
+    }
+    const given = t.status === 'closed' && x.best != null && r != null && x.best - r >= 0.5 ? `<div class="mut" style="font-size:11px">คืนกำไรไป ${(x.best - r).toFixed(2)}R จากจุดดีสุด</div>` : '';
+    const changes = evFor(t.id);
+    return `<div class="tc ${cls}">
+      <div class="hd"><b>#${t.id} ${t.side > 0 ? '<span class="up">BUY</span>' : '<span class="dn">SELL</span>'} ${esc(t.otype)}</b><span class="tag">${st}</span></div>
+      <div class="hd"><span class="big ${r > 0 ? 'up' : r < 0 ? 'dn' : ''}">${r != null ? sg(r) + 'R' : '—'}</span><span class="${usd > 0 ? 'up' : usd < 0 ? 'dn' : 'mut'}">${usd != null ? (usd >= 0 ? '+' : '-') + '$' + Math.abs(usd).toFixed(2) : ''} ${t.status === 'open' ? '<span class="mut">(ลอยตัว)</span>' : ''}</span></div>
+      ${bar}${given}
+      <div class="grid2">
+        <span>เข้า</span><b>${n2(t.fill ?? t.entry)}${t.fill_t ? ' · ' + fmtT(t.fill_t) : ''}</b>
+        <span>เสี่ยง</span><b>${t.risk_pct ?? 1}% ของพอร์ต</b>
+        <span>SL</span><b>${n2(t.sl_init)}${t.sl !== t.sl_init ? ' → ' + n2(t.sl) : ''}</b>
+        <span>TP</span><b>${n2(t.tp_init ?? t.tp)}${t.tp_init != null && t.tp !== t.tp_init ? ' → ' + n2(t.tp) : ''}</b>
+        ${t.status === 'closed' ? `<span>ออก</span><b>${n2(t.exit)} · ${esc(WHY[t.exit_reason] || t.exit_reason || '')}</b>` : ''}
+        <span>ถือ</span><b>${t.fill_t ? dur((t.exit_t || Date.now()) - t.fill_t) : t.status === 'pending' ? 'หมดอายุ ' + fmtT(t.expiry_t) : '—'}</b>
+      </div>
+      ${t.why ? `<div class="why"><span class="mut">เหตุผลที่เข้า:</span> ${esc(t.why)}</div>` : ''}
+      ${changes.length ? `<ul>${changes.map(e => `<li>${esc(fmtT(Date.parse(e.time.replace(' ', 'T') + 'Z')))} ${esc(e.msg.replace(/^ปรับ (BUY|SELL) #\d+: /, ''))}</li>`).join('')}</ul>` : ''}
+      ${t.review ? `<details open><summary class="mut" style="font-size:12px">บทวิเคราะห์จาก AI</summary><div class="rv">${esc(t.review)}</div></details>` : t.status === 'closed' ? '<div class="mut" style="font-size:12px">รอ AI เขียนบทวิเคราะห์ (แท่ง H1 ถัดไป)</div>' : ''}
+      ${t.lesson ? `<div class="why"><span class="mut">บทเรียน:</span> ${esc(t.lesson)}</div>` : ''}
+      ${tw ? `<div class="tw">คู่เทียบสุ่ม: ${tw.side > 0 ? 'BUY' : 'SELL'} ${twR != null ? `<b class="${twR > 0 ? 'up' : twR < 0 ? 'dn' : ''}">${sg(twR)}R</b>` : '—'} ${tw.status === 'open' ? '(ลอยตัว)' : ''}
+        ${r != null && twR != null ? ` · AI ${r - twR >= 0 ? 'ดีกว่า' : 'แย่กว่า'} <b>${Math.abs(r - twR).toFixed(2)}R</b>` : ''}</div>` : t.fill ? '' : '<div class="tw mut">คู่เทียบสุ่มจะเปิดตอนออเดอร์ได้ fill</div>'}
+    </div>`;
+  }).join('');
+}
 async function load() {
   const d = await api('/api/view'); $('app').hidden = false; $('login').hidden = true;
   $('st').textContent = !d.key ? 'ยังไม่ได้ใส่ API key' : d.paused ? 'AI หยุดอยู่' : 'AI ทำงาน'; $('st').className = 'pill ' + (!d.key || d.paused ? 'bad' : 'ok');
   $('feed').textContent = d.feed ? `ราคาล่าสุด ${d.feed.at} UTC (${d.feed.symbol})` : 'ยังไม่มีราคาจาก EA';
   $('pause').textContent = d.paused ? 'เปิด AI ต่อ' : 'หยุด AI'; $('pause').onclick = async () => { await api('/api/pause', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paused: !d.paused }) }); load(); };
-  draw(d);
+  draw(d); renderCards(d);
   $('kai').innerHTML = kpi(d.score.ai); $('krand').innerHTML = kpi(d.score.rand);
   const a = d.score.ai, r = d.score.rand;
   $('kpass').innerHTML = a.n >= 50 ? (a.avg_r >= 0.10 && a.avg_r - (r.avg_r ?? 0) >= 0.15 ? '<b class="up">ผ่าน</b>' : '<b class="dn">ยังไม่ผ่าน</b>') : `<span class="mut">เก็บข้อมูล ${a.n}/50 ไม้</span>`;

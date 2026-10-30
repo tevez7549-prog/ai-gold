@@ -119,9 +119,9 @@ async function saveTrade(env, tr) {
       tr.mfe ?? null, tr.mae ?? null, tr.id).run();
 }
 async function insertTrade(env, tr) {
-  const r = await env.DB.prepare(`INSERT INTO trades(kind,status,side,otype,created,created_t,expiry_t,entry,sl,sl_init,tp,fill_t,fill,decision_id,twin_of,risk_pct,tp_init)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(tr.kind, tr.status, tr.side, tr.otype, nowIso(), tr.created_t, tr.expiry_t, tr.entry, tr.sl, tr.sl_init, tr.tp,
-    tr.fill_t ?? null, tr.fill ?? null, tr.decision_id ?? null, tr.twin_of ?? null, tr.risk_pct ?? 1, tr.tp).run();
+  const r = await env.DB.prepare(`INSERT INTO trades(kind,status,side,otype,created,created_t,expiry_t,entry,sl,sl_init,tp,fill_t,fill,decision_id,twin_of,risk_pct,tp_init,why)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(tr.kind, tr.status, tr.side, tr.otype, nowIso(), tr.created_t, tr.expiry_t, tr.entry, tr.sl, tr.sl_init, tr.tp,
+    tr.fill_t ?? null, tr.fill ?? null, tr.decision_id ?? null, tr.twin_of ?? null, tr.risk_pct ?? 1, tr.tp, tr.why ? String(tr.why).slice(0, 600) : null).run();
   tr.id = r.meta.last_row_id; return tr;
 }
 async function runEngine(env, m15, spread, sinceT) {
@@ -342,7 +342,7 @@ async function decide(env, h1, m15, spread) {
     if (used + rp > RULES.openRiskCap + 1e-9) { rejects.push(`เปิดใหม่: ความเสี่ยงรวม ${r2(used)}%+${rp}% เกิน ${RULES.openRiskCap}%`); continue; }
     const expH = Math.min(Math.max(+o.expiry_hours || 8, 1), RULES.maxExpiryH);
     const tr = { kind: 'ai', status: v.type === 'market' ? 'open' : 'pending', side: v.side, otype: v.type, created_t: barT, expiry_t: barT + expH * 3600e3,
-      entry: v.entry, sl: +o.sl, sl_init: +o.sl, tp: +o.tp, risk_pct: rp, decision_id: null };
+      entry: v.entry, sl: +o.sl, sl_init: +o.sl, tp: +o.tp, risk_pct: rp, decision_id: null, why: o.why };
     if (v.type === 'market') { tr.fill = v.entry; tr.fill_t = barT; }
     await insertTrade(env, tr); liveNow.push(tr); tr._why = o.why;
     if (v.type === 'market') {
@@ -531,9 +531,14 @@ async function view(env) {
       sum_r: r2(x.reduce((a, b) => a + b, 0)), pf: l.length ? r2(w.reduce((a, b) => a + b, 0) / -l.reduce((a, b) => a + b, 0)) : null }; };
   const tok = await env.DB.prepare('SELECT COUNT(*) n, SUM(tokens_in) i, SUM(tokens_out) o FROM decisions').first();
   const events = (await env.DB.prepare('SELECT * FROM events ORDER BY id DESC LIMIT 20').all()).results;
+  // per-trade cards: SL/TP changes + reviews + live price
+  const tradeEvents = (await env.DB.prepare("SELECT id,time,agent,kind,msg FROM events WHERE kind IN ('sl','open','close','cancel','order','rep') ORDER BY id DESC LIMIT 400").all()).results;
+  const ping = await getDoc(env, 'state', 'ping'), lastM15 = await env.DB.prepare("SELECT c FROM bars WHERE tf='M15' ORDER BY t DESC LIMIT 1").first();
+  const fresh = ping && Date.now() - ping.at < 5 * 60e3;
+  const live = { bid: fresh && ping.bid ? ping.bid : (lastM15 ? lastM15.c : null), ask: fresh && ping.ask ? ping.ask : null, at: fresh ? ping.at : null };
   return { bars: H1, decisions: dec, trades, score: { ai: score('ai'), rand: score('rand') }, lessons: ((await getDoc(env, 'state', 'lessons')) || { items: [] }).items.slice().reverse(),
     feed: await getDoc(env, 'state', 'feed'), paused: (await kvGet(env, 'paused', '0')) === '1', key: !!env.ANTHROPIC_API_KEY, model: MODEL, rules: RULES,
-    usage: { decisions: tok.n, tokens_in: tok.i || 0, tokens_out: tok.o || 0 }, events };
+    usage: { decisions: tok.n, tokens_in: tok.i || 0, tokens_out: tok.o || 0 }, events, tradeEvents, live };
 }
 
 export default {
