@@ -32,6 +32,9 @@
   .tc .why, .tc .rv { font-size:12px; color:#c9ced8; overflow-wrap:anywhere; } .tc .rv { background:#0b0d11; border-radius:6px; padding:6px 8px; white-space:pre-wrap; }
   .tc .tw { font-size:12px; border-top:1px dashed var(--line); padding-top:6px; } .tc ul { margin:0; padding-left:16px; font-size:12px; color:var(--mut); }
   .filters button.on { background:var(--acc); color:#111; border-color:var(--acc); }
+  .ags { display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px; }
+  .ag { background:#12151b; border:1px solid var(--line); border-radius:8px; padding:10px; } .ag .nm { font-weight:600; } .ag .big { font-size:22px; font-weight:700; }
+  .ag .g { display:grid; grid-template-columns:1fr auto; gap:2px 10px; font-size:13px; } .ag .g span { color:var(--mut); }
   #login { max-width:320px; margin:80px auto; } input { width:100%; padding:8px; border-radius:6px; border:1px solid var(--line); background:#0b0d11; color:var(--tx); margin:8px 0; }
 </style>
 </head>
@@ -51,6 +54,8 @@
   <section>
     <div class="card"><h2>กราฟ H1 · เส้นที่ AI ตีไว้ และแผนล่าสุด</h2><div id="chart"></div>
       <div class="mut" style="font-size:12px;margin-top:6px">เส้นเหลือง = แนวที่ AI ตี · ฟ้า = จุดเข้า · แดง = SL · เขียว = TP · เส้นประ = EMA50 / EMA200</div></div>
+    <div class="card" style="margin-top:12px"><h2>สกอร์บอร์ดแต่ละ AI (พอร์ตเสมือนคนละ $10,000)</h2><div id="agents" class="ags"></div>
+      <div class="mut" style="font-size:12px;margin-top:6px">เปิด = ไม้ที่ได้ fill แล้วทั้งหมด · กำไร/ขาดทุน = รวมจากไม้ที่ปิดแล้ว · ลอยตัว = ไม้ที่ยังเปิดอยู่ ณ ราคาล่าสุด</div></div>
     <div class="row" style="margin-top:12px">
       <div class="card kpi"><h2>AI</h2><div id="kai"></div></div>
       <div class="card kpi"><h2>เทียบ: ทิศสุ่ม SL/TP เดียวกัน</h2><div id="krand"></div></div>
@@ -168,6 +173,14 @@ async function load() {
   $('feed').textContent = d.feed ? `ราคาล่าสุด ${d.feed.at} UTC (${d.feed.symbol})` : 'ยังไม่มีราคาจาก EA';
   $('pause').textContent = d.paused ? 'เปิด AI ต่อ' : 'หยุด AI'; $('pause').onclick = async () => { await api('/api/pause', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paused: !d.paused }) }); load(); };
   draw(d); renderCards(d);
+  const usd = v => (v > 0 ? '+' : v < 0 ? '−' : '') + '$' + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 2 });
+  const cl = v => v > 0 ? 'up' : v < 0 ? 'dn' : '';
+  $('agents').innerHTML = (d.agents || []).map(a => `<div class="ag"><div class="nm">${esc(a.name)}</div>
+    <div class="big ${cl(a.net_usd)}">${usd(a.net_usd)}</div><div class="mut" style="font-size:12px;margin-bottom:6px">สุทธิจากไม้ที่ปิดแล้ว${a.float_usd ? ` · ลอยตัว <span class="${cl(a.float_usd)}">${usd(a.float_usd)}</span>` : ''} · พอร์ต $${a.equity.toLocaleString()}</div>
+    <div class="g"><span>เปิดไปแล้ว</span><b>${a.opened} ไม้</b><span>ปิดแล้ว</span><b>${a.closed} ไม้ (ชนะ ${a.wins} / แพ้ ${a.losses})</b>
+    <span>ยังเปิดอยู่</span><b>${a.open} ไม้</b><span>ออเดอร์รอ fill</span><b>${a.pending}</b><span>ยกเลิก</span><b>${a.cancelled}</b>
+    <span>กำไรรวม</span><b class="up">${usd(a.profit_usd)}</b><span>ขาดทุนรวม</span><b class="dn">${usd(a.loss_usd)}</b>
+    <span>ชนะ</span><b>${a.win_pct ?? '—'}${a.win_pct != null ? '%' : ''}</b><span>R รวม / เฉลี่ย</span><b>${a.sum_r} / ${a.avg_r ?? '—'}</b></div></div>`).join('');
   $('kai').innerHTML = kpi(d.score.ai); $('krand').innerHTML = kpi(d.score.rand);
   const a = d.score.ai, r = d.score.rand;
   $('kpass').innerHTML = a.n >= 50 ? (a.avg_r >= 0.10 && a.avg_r - (r.avg_r ?? 0) >= 0.15 ? '<b class="up">ผ่าน</b>' : '<b class="dn">ยังไม่ผ่าน</b>') : `<span class="mut">เก็บข้อมูล ${a.n}/50 ไม้</span>`;

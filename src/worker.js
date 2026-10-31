@@ -536,7 +536,22 @@ async function view(env) {
   const ping = await getDoc(env, 'state', 'ping'), lastM15 = await env.DB.prepare("SELECT c FROM bars WHERE tf='M15' ORDER BY t DESC LIMIT 1").first();
   const fresh = ping && Date.now() - ping.at < 5 * 60e3;
   const live = { bid: fresh && ping.bid ? ping.bid : (lastM15 ? lastM15.c : null), ask: fresh && ping.ask ? ping.ask : null, at: fresh ? ping.at : null };
-  return { bars: H1, decisions: dec, trades, score: { ai: score('ai'), rand: score('rand') }, lessons: ((await getDoc(env, 'state', 'lessons')) || { items: [] }).items.slice().reverse(),
+  // per-agent scoreboard over ALL trades (owner 2026-10-31): each agent = trades.kind with its own virtual $10,000, compounding like account()
+  const all = (await env.DB.prepare('SELECT kind,status,side,fill,entry,sl,sl_init,risk_pct,r,exit_t,fill_t,id FROM trades ORDER BY COALESCE(exit_t,fill_t,0),id').all()).results;
+  const AG = { ai: `AI-GOLD (Claude ${MODEL})`, rand: 'RANDOM TWIN (สุ่มฝั่ง)' };
+  const agents = [...new Set(['ai', 'rand', ...all.map(t => t.kind)])].map(k => {
+    const ts = all.filter(t => t.kind === k); let eq = RULES.startEquity, profit = 0, loss = 0, sumR = 0, w = 0, l = 0, fl = 0;
+    for (const t of ts.filter(t => t.status === 'closed' && t.r != null)) { const usd = eq * (t.risk_pct ?? 1) / 100 * t.r; eq += usd; sumR += t.r;
+      if (usd > 0) { profit += usd; w++; } else { loss += usd; l++; } }
+    for (const t of ts.filter(t => t.status === 'open' && live.bid)) { const risk0 = Math.abs(t.fill - t.sl_init) || 1;
+      fl += eq * (t.risk_pct ?? 1) / 100 * (t.side > 0 ? live.bid - t.fill : t.fill - (live.ask ?? live.bid)) / risk0; }
+    const closed = w + l;
+    return { kind: k, name: AG[k] || k, opened: ts.filter(t => t.fill_t).length, open: ts.filter(t => t.status === 'open').length, closed,
+      pending: ts.filter(t => t.status === 'pending').length, cancelled: ts.filter(t => t.status === 'cancelled').length, wins: w, losses: l,
+      profit_usd: r2(profit), loss_usd: r2(loss), net_usd: r2(profit + loss), float_usd: r2(fl), equity: r2(eq + fl),
+      sum_r: r2(sumR), avg_r: closed ? r2(sumR / closed) : null, win_pct: closed ? r2(w / closed * 100) : null };
+  });
+  return { agents, bars: H1, decisions: dec, trades, score: { ai: score('ai'), rand: score('rand') }, lessons: ((await getDoc(env, 'state', 'lessons')) || { items: [] }).items.slice().reverse(),
     feed: await getDoc(env, 'state', 'feed'), paused: (await kvGet(env, 'paused', '0')) === '1', key: !!env.ANTHROPIC_API_KEY, model: MODEL, rules: RULES,
     usage: { decisions: tok.n, tokens_in: tok.i || 0, tokens_out: tok.o || 0 }, events, tradeEvents, live };
 }
